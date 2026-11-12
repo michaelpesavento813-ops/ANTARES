@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'ANTARES-upload.zip'
+      - '*.zip'
   workflow_dispatch:
 permissions:
   contents: write
@@ -18,9 +18,12 @@ jobs:
         run: |
           python3 - <<'PY'
           import zipfile, pathlib
-          archive = pathlib.Path('ANTARES-upload.zip')
+          archives = list(pathlib.Path('.').glob('*.zip'))
+          if len(archives) != 1:
+              raise SystemExit(f'Expected exactly one ZIP in repository root, found {len(archives)}')
+          archive = archives[0]
           if not archive.exists():
-              raise SystemExit('Upload ANTARES-upload.zip to the repository root first.')
+              raise SystemExit('Upload your original ZIP to the repository root first.')
           with zipfile.ZipFile(archive) as z:
               entries = [i for i in z.infolist() if not i.is_dir()]
               if len(entries) != 101:
@@ -38,6 +41,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add xfer/
-          git rm -f ANTARES-upload.zip
+          git rm -f -- '*.zip'
           git diff --cached --quiet || git commit -m "Import 101 original ANTARES JPEGs into xfer/"
           git push
