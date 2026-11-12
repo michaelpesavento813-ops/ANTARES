@@ -1,0 +1,43 @@
+name: Import ANTARES photos
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ANTARES-upload.zip'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Validate and extract 101 original JPEGs
+        run: |
+          python3 - <<'PY'
+          import zipfile, pathlib
+          archive = pathlib.Path('ANTARES-upload.zip')
+          if not archive.exists():
+              raise SystemExit('Upload ANTARES-upload.zip to the repository root first.')
+          with zipfile.ZipFile(archive) as z:
+              entries = [i for i in z.infolist() if not i.is_dir()]
+              if len(entries) != 101:
+                  raise SystemExit(f'Expected 101 images; found {len(entries)}')
+              for i in entries:
+                  p = pathlib.PurePosixPath(i.filename)
+                  if len(p.parts) != 2 or p.parts[0] != 'xfer' or p.suffix.lower() != '.jpg' or i.file_size > 20000000:
+                      raise SystemExit(f'Unexpected or unsafe entry: {i.filename}')
+                  dest = pathlib.Path(*p.parts)
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  dest.write_bytes(z.read(i))
+          PY
+      - name: Commit extracted images
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add xfer/
+          git rm -f ANTARES-upload.zip
+          git diff --cached --quiet || git commit -m "Import 101 original ANTARES JPEGs into xfer/"
+          git push
