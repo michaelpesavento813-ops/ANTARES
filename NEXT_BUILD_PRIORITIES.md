@@ -1,7 +1,8 @@
 # ANTARES — NEXT BUILD PRIORITIES
 
-## P0 / Requirement 001 — Tattoo Chirality Lock (RELEASE BLOCKER)
+## P0 / Requirement 001 — Tattoo Chirality Lock (MANDATORY CORE FEATURE / RELEASE BLOCKER)
 
+**Classification:** Permanent ANTARES core architecture, not a plugin, optional module, or user-toggleable enhancement.
 **Status:** Approved for next build; implementation pending.
 **Order:** First processing stage, before restoration, upscaling, tattoo mapping, geometry analysis, or 3D reconstruction.
 
