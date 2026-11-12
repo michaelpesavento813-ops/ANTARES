@@ -1,0 +1,43 @@
+name: Extract ANTARES images
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.zip'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Extract original JPEGs preserving paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          root=Path('.').resolve()
+          for archive in Path('.').glob('*.zip'):
+              with ZipFile(archive) as z:
+                  for info in z.infolist():
+                      if info.is_dir(): continue
+                      dest=(root/info.filename).resolve()
+                      if not dest.is_relative_to(root):
+                          raise ValueError('Unsafe archive path')
+                      if dest.suffix.lower() not in ('.jpg','.jpeg'):
+                          continue
+                      dest.parent.mkdir(parents=True,exist_ok=True)
+                      dest.write_bytes(z.read(info))
+          PY
+      - name: Commit extracted JPEGs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- '*.jpg' '*.jpeg'
+          if ! git diff --cached --quiet; then
+            git commit -m "Extract ANTARES original JPEG images"
+            git push
+          fi
