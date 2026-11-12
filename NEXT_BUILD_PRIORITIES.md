@@ -25,3 +25,23 @@ A single photo does not always permit reliable mirror detection; do not promise 
 
 ### Next-build related maintenance
 Update GitHub Actions ZIP import workflows to accept subject-named top-level directories (e.g. `BRENDAS/`) rather than hardcoded `xfer/`; preserve source originals.
+
+
+## P0 / Requirement 002 — Tattoo Forensic Reconstruction & Verification (CORE FEATURE)
+
+**Classification:** Mandatory core capability of standalone Tattoo Chirality Lock and future ANTARES integration.
+**Status:** Approved specification; implementation pending.
+
+### Required behavior
+1. Detect and group multiple observations of the same tattoo across a subject's photographs, accounting for perspective, scale, lighting, occlusion, and verified left/right orientation.
+2. Preserve immutable source crops; maintain a traceable evidence link from every derived view to original photograph, crop coordinates, and processing settings.
+3. Offer non-generative enhancement (contrast, denoising, deblurring where supportable, perspective rectification) with explicit disclosure of limits; never represent invented detail as recovered source evidence.
+4. For lettering tattoos, compare multiple OCR hypotheses and show character-level uncertainty, preserving UNKNOWN characters rather than silently completing words.
+5. For non-text tattoos, compare geometry, linework, colors, symbols, and spatial layout across independent views; distinguish verified detail from proposed interpretation.
+6. Require evidence-backed human approval for ambiguous text, symbols, or fine details; allow user-provided authoritative references while clearly recording their provenance.
+7. Once approved, lock verified text, artwork identity, anatomical laterality, and placement as the canonical tattoo fingerprint; reject inconsistent future reconstructions for review.
+8. Generate a forensic audit report: source images, evidence crops, confidence/uncertainty, hypotheses, approved interpretation, and checksums.
+9. Never modify source images as part of analysis. Under separately authorized Damn the Torpedoes mode, replace only explicitly selected verified corrected cloud images, commit as a batch, and retain Git history where available.
+
+### Acceptance gate
+No ambiguous character, symbol, or tattoo geometry may be promoted as verified solely because a generative model produced a plausible reconstruction. UNKNOWN must remain UNKNOWN until independent evidence or explicit user verification resolves it.
