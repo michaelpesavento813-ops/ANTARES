@@ -1,0 +1,8 @@
+.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore
+
+/app/src/main/assets/face_landmarker.task*
+/app/src/androidTest/assets/astronaut.png*

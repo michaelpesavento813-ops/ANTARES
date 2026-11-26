@@ -1,121 +1,400 @@
 package com.antares.prototype
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
-import android.graphics.Canvas
-import android.graphics.Paint
+import android.database.sqlite.SQLiteConstraintException
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.DocumentsContract
 import android.widget.Button
-import android.widget.ImageView
+import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.ProgressBar
+import android.view.View
 import android.widget.TextView
 import android.widget.Toast
-import java.io.File
+import java.util.Locale
 
 class MainActivity : Activity() {
-    private var source: Bitmap? = null
-    private var result: Bitmap? = null
-    private lateinit var preview: ImageView
-    private lateinit var status: TextView
-    private val sourceFile get() = File(filesDir, "source.png")
-    private val resultFile get() = File(filesDir, "result.png")
+    private val db by lazy { ProjectStore(applicationContext) }
+    private val settings by lazy { getSharedPreferences("workspace", MODE_PRIVATE) }
+    private val handler = Handler(Looper.getMainLooper())
+    private var projectId = 1L
+    private var photoId = 0L
+    private var pendingResult = 0L
+    private var lastUi: List<Any> = emptyList()
+
+    private lateinit var projectLabel: TextView
+    private lateinit var photoLabel: TextView
+    private lateinit var jobsLabel: TextView
+    private lateinit var progress: ProgressBar
+    private lateinit var scan: Button
+    private lateinit var grayscale: Button
+    private lateinit var saveJson: Button
+    private lateinit var saveCsv: Button
+    private lateinit var savePng: Button
+    private lateinit var retry: Button
+
+    private val refresh = object : Runnable {
+        override fun run() {
+            guarded { redraw() }
+            handler.postDelayed(this, 600)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val layout = LinearLayout(this).apply {
+        projectId = savedInstanceState?.getLong("project") ?: settings.getLong("project", 1L)
+        photoId = savedInstanceState?.getLong("photo") ?: settings.getLong("photo", 0L)
+        pendingResult = savedInstanceState?.getLong("pending") ?: settings.getLong("pending", 0L)
+
+        val scroll = ScrollView(this)
+        val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 32, 28, 24)
+            val padding = (20 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding, padding, padding)
         }
-        val title = TextView(this).apply { text = "ANTARES — Prototype"; textSize = 25f }
-        layout.addView(title)
-        status = TextView(this).apply { text = "Select a photograph to begin."; textSize = 16f }
-        layout.addView(status)
-        preview = ImageView(this).apply { adjustViewBounds = true }
-        layout.addView(preview, LinearLayout.LayoutParams(-1, 0, 1f))
-        fun action(label: String, run: () -> Unit) {
-            layout.addView(Button(this).apply { text = label; setOnClickListener { run() } })
+        scroll.setOnApplyWindowInsetsListener { view, insets ->
+            @Suppress("DEPRECATION")
+            view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+            insets
         }
-        action("Select Photo") {
-            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                type = "image/*"
-                addCategory(Intent.CATEGORY_OPENABLE)
-            }, 10)
+        scroll.addView(body)
+        setContentView(scroll)
+        text(body, "ANTARES", 28f)
+        projectLabel = text(body, "", 20f)
+        action(body, "Choose project") { chooseProject() }
+        action(body, "New project") { newProject() }
+        action(body, "Add photos") { pickPhotos() }
+        photoLabel = text(body, "", 17f)
+        action(body, "Choose imported photo") { choosePhoto() }
+        scan = action(body, "Deep Scan") { process("scan", "Deep Scan") }
+        action(body, "Deep Scan entire project") {
+            db.queueBatch(projectId)
+            kick()
         }
-        action("Restorative Repair (basic grayscale preview)") {
-            val bitmap = source ?: return@action message("Select a photo first.")
-            val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+        grayscale = action(body, "Grayscale preview") { process("png", "Grayscale preview") }
+        saveJson = action(body, "Save As JSON") { save(JSON) }
+        saveCsv = action(body, "Save As CSV") { save(CSV) }
+        savePng = action(body, "Save As PNG") { save(PNG) }
+        action(body, "Preferred export folder") {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), FOLDER)
+        }
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            visibility = View.GONE
+            contentDescription = "Processing in progress"
+            body.addView(this, LinearLayout.LayoutParams(-1, -2))
+        }
+        jobsLabel = text(body, "", 15f)
+        action(body, "Open saved file") { openExport() }
+        retry = action(body, "Retry failed job") { retryJob() }
+        action(body, "System health") { showHealth() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        guarded { if (db.next() != null) ProcessingService.schedule(this) }
+        handler.post(refresh)
+    }
+
+    override fun onStop() {
+        handler.removeCallbacks(refresh)
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        db.close()
+        super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putLong("project", projectId)
+        outState.putLong("photo", photoId)
+        outState.putLong("pending", pendingResult)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun redraw() {
+        val project = db.projects().firstOrNull { it.id == projectId } ?: db.projects().first().also {
+            projectId = it.id
+            photoId = 0L
+        }
+        val latest = db.recent(project.id)
+        val chosen = db.task(photoId)?.takeIf {
+            it.projectId == project.id && it.kind == "import" && it.status == "done"
+        } ?: latest.firstOrNull { it.kind == "import" && it.status == "done" }
+        if (chosen != null && photoId != chosen.id) {
+            photoId = chosen.id
+            rememberSelection()
+        }
+        val queued = db.queuedCount(project.id)
+        val key = listOf(project, latest, photoId, queued)
+        if (lastUi == key) return
+        lastUi = key
+        projectLabel.text = project.name
+        photoLabel.text = chosen?.let { "${it.label}\n${it.imageAlias} · ${it.width} × ${it.height}" }
+            ?: "Add photos to get started."
+        scan.isEnabled = chosen != null
+        grayscale.isEnabled = chosen != null
+        val hasScan = result("scan") != null || db.latestBatch(projectId) != null
+        saveJson.isEnabled = hasScan
+        saveCsv.isEnabled = hasScan
+        savePng.isEnabled = result("png") != null
+        retry.isEnabled = latest.any { it.status == "failed" }
+        progress.visibility = if (queued > 0) View.VISIBLE else View.GONE
+        val heading = if (queued > 0) "Active and queued jobs · $queued" else "Recent work"
+        jobsLabel.text = latest.take(8).joinToString("\n\n", prefix = "$heading\n\n") {
+            "${it.label}\n${status(it)}"
+        }.trimEnd()
+    }
+
+    private fun status(task: ProjectStore.Task): String = when (task.status) {
+        "queued" -> "Queued or processing…"
+        "failed" -> "Failed. ${task.detail}"
+        else -> task.detail
+    }
+
+    private fun chooseProject() {
+        val projects = db.projects()
+        AlertDialog.Builder(this).setTitle("Choose project")
+            .setItems(projects.map { it.name }.toTypedArray()) { _, index ->
+                selectProject(projects[index].id)
+            }.show()
+    }
+
+    private fun selectProject(id: Long) {
+        projectId = id
+        photoId = 0L
+        rememberSelection()
+        redraw()
+    }
+
+    private fun newProject() {
+        val input = EditText(this).apply { hint = "Project name"; isSingleLine = true }
+        val alert = AlertDialog.Builder(this).setTitle("New project").setView(input)
+            .setNegativeButton("Cancel", null).setPositiveButton("Create", null).create()
+        alert.setOnShowListener {
+            alert.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                try {
+                    selectProject(db.addProject(input.text.toString()))
+                    alert.dismiss()
+                } catch (_: SQLiteConstraintException) {
+                    input.error = "A project with this name already exists."
+                } catch (_: IllegalArgumentException) {
+                    input.error = "Enter a name with 1 to 80 characters."
+                }
             }
-            Canvas(output).drawBitmap(bitmap, 0f, 0f, paint)
-            result = output
-            persist(resultFile, output)
-            preview.setImageBitmap(output)
-            status.text = "Grayscale preview generated. This is not full restoration."
         }
-        action("Save As…") {
-            if (result == null) return@action message("Process a photo first.")
-            startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                type = "image/png"
-                addCategory(Intent.CATEGORY_OPENABLE)
-                putExtra(Intent.EXTRA_TITLE, "ANT0001.PNG")
-            }, 20)
-        }
-        action("Deep Scan") { message("Deep Scan is not yet integrated.") }
-        action("Make Me Pretty") { message("Make Me Pretty is not yet integrated.") }
-        action("System Health") {
-            message("Photo engine: basic only; MediaPipe: not integrated; SQLite: not integrated.")
-        }
-        setContentView(layout)
-        if (sourceFile.exists()) {
-            source = BitmapFactory.decodeFile(sourceFile.absolutePath)
-            result = if (resultFile.exists()) BitmapFactory.decodeFile(resultFile.absolutePath) else null
-            preview.setImageBitmap(result ?: source)
-            status.text = "Previous session restored."
-        }
+        alert.show()
     }
-    private fun message(s: String) { Toast.makeText(this, s, Toast.LENGTH_LONG).show() }
-    private fun persist(file: File, bitmap: Bitmap) {
-        file.outputStream().use { if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) error("PNG encode failed") }
+
+    private fun choosePhoto() {
+        val photos = db.photos(projectId)
+        if (photos.isEmpty()) {
+            message("Add photos first.")
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Choose imported photo")
+            .setItems(photos.map { "${it.imageAlias} · ${it.label}" }.toTypedArray()) { _, index ->
+                photoId = photos[index].id
+                rememberSelection()
+                redraw()
+            }.show()
     }
+
+    private fun rememberSelection() {
+        settings.edit().putLong("project", projectId).putLong("photo", photoId).apply()
+    }
+
+    private fun pickPhotos() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }, IMPORT)
+    }
+
+    private fun process(kind: String, label: String) {
+        if (photoId == 0L) return
+        db.queue(projectId, kind, "", label, photoId)
+        kick()
+    }
+
+    private fun result(kind: String): ProjectStore.Task? {
+        if (photoId == 0L) return null
+        return db.result(projectId, kind, photoId)
+    }
+
+    private fun save(format: Int) {
+        val single = result(if (format == PNG) "png" else "scan")
+        val batch = if (format == PNG) null else db.latestBatch(projectId)
+        if (single == null && batch == null) return
+        if (single != null && batch != null) {
+            AlertDialog.Builder(this).setTitle("Choose analysis to export")
+                .setItems(arrayOf("Selected photo · result ${single.id}", "Entire project · result ${batch.id}")) { _, index ->
+                    guarded { openSavePicker(format, if (index == 0) single else batch) }
+                }.show()
+        } else openSavePicker(format, single ?: requireNotNull(batch))
+    }
+
+    private fun openSavePicker(format: Int, job: ProjectStore.Task) {
+        val extension = when (format) { CSV -> "CSV"; PNG -> "PNG"; else -> "JSN" }
+        val mime = when (format) { CSV -> "text/csv"; PNG -> "image/png"; else -> "application/json" }
+        val suggested = exportName("ANT", job.id, extension)
+        // JSON uses the explicit .json extension. CSV and PNG have three-letter extensions.
+        val filename = if (format == JSON) suggested.substringBefore('.') + ".json"
+            else suggested.substringBefore('.') + "." + extension.lowercase(Locale.ROOT)
+        pendingResult = job.id
+        settings.edit().putLong("pending", pendingResult).commit()
+        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = mime
+            putExtra(Intent.EXTRA_TITLE, filename)
+            val folder = settings.getString("exportFolder", null)
+            if (folder != null) putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(folder))
+        }, format)
+    }
+
+    private fun kick() {
+        ProcessingService.schedule(this)
+        redraw()
+    }
+
+    @Deprecated("Activity result callback for platform pickers")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
-        val uri: Uri = data?.data ?: return
-        try {
+        if (resultCode != RESULT_OK || data == null) return
+        guarded {
             when (requestCode) {
-                10 -> {
-                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    contentResolver.openInputStream(uri).use { BitmapFactory.decodeStream(it, null, options) }
-                    val longest = maxOf(options.outWidth, options.outHeight)
-                    require(longest > 0) { "Unsupported image" }
-                    val sample = (longest / 2048).coerceAtLeast(1)
-                    val decoded = contentResolver.openInputStream(uri).use {
-                        BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
-                    } ?: error("Could not decode photo")
-                    source = decoded
-                    result = null
-                    persist(sourceFile, decoded)
-                    resultFile.delete()
-                    preview.setImageBitmap(decoded)
-                    status.text = "Photo loaded (${decoded.width} × ${decoded.height})."
+                IMPORT -> {
+                    val uris = data.clipData?.let { clip ->
+                        List(clip.itemCount) { clip.getItemAt(it).uri }
+                    } ?: listOfNotNull(data.data)
+                    for (uri in uris.distinct()) {
+                        try {
+                            keepAccess(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            db.queue(projectId, "import", uri.toString(), documentName(this, uri))
+                        } catch (_: SecurityException) {
+                            db.fail(db.queue(projectId, "import", uri.toString(), "Import photo"),
+                                "Android could not retain access to this photo. Select it through a different Files provider.")
+                        }
+                    }
+                    if (uris.isNotEmpty()) kick()
                 }
-                20 -> {
-                    val bitmap = result ?: error("No result to save")
-                    contentResolver.openOutputStream(uri, "wt")?.use {
-                        check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) { "PNG encode failed" }
-                    } ?: error("Could not open destination")
-                    status.text = "Saved PNG to selected destination."
+                FOLDER -> {
+                    val folder = data.data ?: return@guarded
+                    val initial = DocumentsContract.buildDocumentUriUsingTree(
+                        folder, DocumentsContract.getTreeDocumentId(folder)
+                    )
+                    settings.edit().putString("exportFolder", initial.toString()).apply()
+                    message("Preferred folder saved.")
+                }
+                JSON, CSV, PNG -> {
+                    val destination = data.data ?: return@guarded
+                    val target = db.task(pendingResult)?.takeIf {
+                        it.status == "done" &&
+                            (if (requestCode == PNG) it.kind == "png" else it.kind in setOf("scan", "batch"))
+                    } ?: error("The result is unavailable. Open the photo and use Save As again.")
+                    val kind = when (requestCode) { CSV -> "csv"; PNG -> "save_png"; else -> "json" }
+                    val access = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    keepAccess(destination, access)
+                    db.queue(target.projectId, kind, destination.toString(), "Save ${kind.substringAfter('_').uppercase(Locale.ROOT)}", target.id)
+                    pendingResult = 0L
+                    settings.edit().remove("pending").apply()
+                    kick()
                 }
             }
-        } catch (e: Exception) {
-            status.text = "Error: ${e.message}"
-            message(status.text.toString())
         }
+    }
+
+    private fun openExport() {
+        val exports = db.recent(projectId).filter {
+            it.status == "done" && it.kind in setOf("csv", "json", "save_png")
+        }
+        if (exports.isEmpty()) {
+            message("Save a result first.")
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Open saved file")
+            .setItems(exports.map { it.detail.substringBefore('\n') }.toTypedArray()) { _, index ->
+                guarded {
+                    val export = exports[index]
+                    val mime = when (export.kind) {
+                        "csv" -> "text/csv"
+                        "json" -> "application/json"
+                        else -> "image/png"
+                    }
+                    startActivity(Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(Uri.parse(export.input), mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    })
+                }
+            }.show()
+    }
+
+    private fun keepAccess(uri: Uri, flags: Int) {
+        require(uri.scheme == "content") { "Choose a document through Android Files." }
+        contentResolver.takePersistableUriPermission(uri, flags)
+    }
+
+    private fun retryJob() {
+        val jobs = db.recent(projectId).filter { it.status == "failed" }
+        if (jobs.isEmpty()) return
+        AlertDialog.Builder(this).setTitle("Retry failed job")
+            .setItems(jobs.map { "${it.label} · ${it.detail}" }.toTypedArray()) { _, index ->
+                guarded { db.retry(jobs[index].id); kick() }
+            }.show()
+    }
+
+    private fun showHealth() {
+        val modelAvailable = runCatching { assets.open("face_landmarker.task").use { it.read() >= 0 } }
+            .getOrDefault(false)
+        val details = buildString {
+            appendLine("Projects and jobs: available")
+            appendLine(if (modelAvailable) "Offline facial model: bundled" else "Offline facial model: unavailable")
+            appendLine("Grayscale preview: available")
+            append("Tattoo verification and full restoration: pending")
+        }
+        AlertDialog.Builder(this).setTitle("System health").setMessage(details)
+            .setPositiveButton("OK", null).show()
+    }
+
+    private fun text(parent: LinearLayout, copy: String, size: Float): TextView =
+        TextView(this).apply {
+            text = copy
+            textSize = size
+            setTextColor(Color.rgb(30, 37, 46))
+            setPadding(0, 10, 0, 10)
+            parent.addView(this)
+        }
+
+    private fun action(parent: LinearLayout, copy: String, run: () -> Unit): Button =
+        Button(this).apply {
+            text = copy
+            isAllCaps = false
+            setOnClickListener { guarded(run) }
+            parent.addView(this, LinearLayout.LayoutParams(-1, -2))
+        }
+
+    private fun guarded(run: () -> Unit) {
+        try { run() } catch (error: Exception) {
+            message(error.message ?: "Something went wrong. Try again.")
+        }
+    }
+
+    private fun message(copy: String) = Toast.makeText(this, copy, Toast.LENGTH_LONG).show()
+
+    private companion object {
+        const val IMPORT = 10
+        const val FOLDER = 11
+        const val JSON = 20
+        const val CSV = 21
+        const val PNG = 22
     }
 }

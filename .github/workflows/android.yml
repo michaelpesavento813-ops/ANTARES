@@ -1,8 +1,11 @@
-name: Build ANTARES APK
+name: Build and test ANTARES
 on:
   push:
+    branches: [main, native-android]
+  pull_request:
     branches: [main]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -14,18 +17,58 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Install Android SDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Install Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-      - name: Compile debug APK
-        run: gradle --no-daemon :app:assembleDebug
-      - name: Upload installable APK
-        uses: actions/upload-artifact@v4
+      - name: Check SDK and build development candidate
+        run: |
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          gradle --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug
+      - name: Verify candidate signature and checksums
+        run: |
+          mkdir delivery
+          cp app/build/outputs/apk/debug/app-debug.apk delivery/ANTARES-development.apk
+          cp app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk delivery/ANTARES-test.apk
+          cd delivery
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs ANTARES-development.apk > signing.txt
+          sha256sum *.apk > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
         with:
-          name: ANTARES-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: ANTARES-development
+          path: delivery/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-build-reports
+          path: |
+            app/build/test-results/testDebugUnitTest/*.xml
+            app/build/reports/lint-results-debug.*
+          if-no-files-found: warn
+
+  android-15:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ANTARES-development
+          path: delivery
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Test actual candidate
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          script: bash ci/test-apk.sh
