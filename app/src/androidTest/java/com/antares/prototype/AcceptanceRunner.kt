@@ -193,7 +193,7 @@ class AcceptanceRunner : Instrumentation() {
                 check(reopened.result(project, "scan", imported)?.id != null)
                 check(reopened.latestBatch(project)?.id == batch)
             }
-            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection and reopened queue. Four workflow routes, cancellation, region-limited edits, two-face rejection, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
+            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection and reopened queue. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
             finish(Activity.RESULT_OK, report)
         } catch (error: Throwable) {
             report.putString("stream", "\nFAIL: ${error.stackTraceToString()}\n")
@@ -234,18 +234,25 @@ class AcceptanceRunner : Instrumentation() {
 
     private fun verifyCrowd(portrait: ByteArray) {
         val original = requireNotNull(BitmapFactory.decodeByteArray(portrait, 0, portrait.size))
-        val pair = Bitmap.createBitmap(original.width * 2, original.height, Bitmap.Config.ARGB_8888)
+        val tile = 256
         try {
-            val canvas = Canvas(pair)
-            canvas.drawBitmap(original, 0f, 0f, null)
-            canvas.drawBitmap(original, original.width.toFloat(), 0f, null)
-            val candidates = detectSubjects(targetContext, pair)
-            check(candidates.size >= 2) { "Expected at least two crowd proposals, found ${candidates.size}" }
-            check(!isolatedRegion(Region(0f, 0f, 1f, 1f), candidates))
-            check(candidates.any { isolatedRegion(it, candidates) })
-        } finally {
-            pair.recycle()
-            original.recycle()
-        }
+            for ((columns, rows) in listOf(2 to 1, 4 to 4)) {
+                val frame = Bitmap.createBitmap(columns * tile, rows * tile, Bitmap.Config.ARGB_8888)
+                try {
+                    val canvas = Canvas(frame)
+                    repeat(columns * rows) { index ->
+                        val left = (index % columns) * tile
+                        val top = (index / columns) * tile
+                        canvas.drawBitmap(original, null, android.graphics.Rect(left, top, left + tile, top + tile), null)
+                    }
+                    val candidates = detectSubjects(targetContext, frame)
+                    check(candidates.size >= columns * rows) {
+                        "Expected ${columns * rows} crowd proposals, found ${candidates.size}"
+                    }
+                    check(!isolatedRegion(Region(0f, 0f, 1f, 1f), candidates))
+                    check(candidates.any { isolatedRegion(it, candidates) })
+                } finally { frame.recycle() }
+            }
+        } finally { original.recycle() }
     }
 }

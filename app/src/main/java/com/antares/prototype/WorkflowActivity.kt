@@ -291,22 +291,49 @@ internal fun detectSubjects(context: Context, bitmap: Bitmap): List<Region> {
     val options = FaceLandmarker.FaceLandmarkerOptions.builder()
         .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").build())
         .setNumFaces(16).build()
+    val proposals = mutableListOf<Region>()
     FaceLandmarker.createFromOptions(context, options).use { detector ->
-        BitmapImageBuilder(bitmap).build().use { image ->
-            return detector.detect(image).faceLandmarks().mapNotNull { face ->
-                runCatching {
-                    val left = face.minOf { it.x() }
-                    val right = face.maxOf { it.x() }
-                    val top = face.minOf { it.y() }
-                    val bottom = face.maxOf { it.y() }
-                    val marginX = (right - left) * 0.12f
-                    val marginY = (bottom - top) * 0.18f
-                    Region((left - marginX).coerceIn(0f, 1f), (top - marginY).coerceIn(0f, 1f),
-                        (right + marginX).coerceIn(0f, 1f), (bottom + marginY).coerceIn(0f, 1f))
-                }.getOrNull()
-            }.sortedWith(compareBy({ it.left }, { it.top }))
+        fun scan(window: Region) {
+            val area = window.pixels(bitmap.width, bitmap.height)
+            val crop = Bitmap.createBitmap(bitmap, area.left, area.top, area.width(), area.height())
+            try {
+                BitmapImageBuilder(crop).build().use { image ->
+                    for (face in detector.detect(image).faceLandmarks()) {
+                        val left = face.minOf { it.x() }
+                        val right = face.maxOf { it.x() }
+                        val top = face.minOf { it.y() }
+                        val bottom = face.maxOf { it.y() }
+                        val marginX = (right - left) * 0.12f
+                        val marginY = (bottom - top) * 0.18f
+                        fun x(point: Float) = ((area.left + point * area.width()) / bitmap.width).coerceIn(0f, 1f)
+                        fun y(point: Float) = ((area.top + point * area.height()) / bitmap.height).coerceIn(0f, 1f)
+                        val box = runCatching {
+                            Region(x(left - marginX), y(top - marginY), x(right + marginX), y(bottom + marginY))
+                        }.getOrNull()
+                        if (box != null && proposals.none { it.overlapRatio(box) >= 0.35f }) proposals.add(box)
+                    }
+                }
+            } finally {
+                if (crop !== bitmap) crop.recycle()
+            }
+        }
+
+        scan(Region(0f, 0f, 1f, 1f))
+        if (maxOf(bitmap.width, bitmap.height) >= 384) {
+            for (grid in listOf(2, 4)) {
+                val overlap = 0.12f / grid
+                for (row in 0 until grid) for (column in 0 until grid) {
+                    scan(Region(
+                        (column.toFloat() / grid - overlap).coerceAtLeast(0f),
+                        (row.toFloat() / grid - overlap).coerceAtLeast(0f),
+                        ((column + 1f) / grid + overlap).coerceAtMost(1f),
+                        ((row + 1f) / grid + overlap).coerceAtMost(1f)
+                    ))
+                }
+            }
         }
     }
+    return proposals.sortedWith(compareBy({ it.left }, { it.top }))
 }
 
 private class SubjectView(context: Context, private val changed: () -> Unit) : View(context) {

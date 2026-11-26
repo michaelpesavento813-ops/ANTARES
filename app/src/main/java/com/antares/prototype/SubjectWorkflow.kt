@@ -37,6 +37,15 @@ internal data class Region(val left: Float, val top: Float, val right: Float, va
     fun intersects(other: Region) =
         left < other.right && right > other.left && top < other.bottom && bottom > other.top
 
+    fun overlapRatio(other: Region): Float {
+        val width = (minOf(right, other.right) - maxOf(left, other.left)).coerceAtLeast(0f)
+        val height = (minOf(bottom, other.bottom) - maxOf(top, other.top)).coerceAtLeast(0f)
+        val overlap = width * height
+        val area = (right - left) * (bottom - top)
+        val otherArea = (other.right - other.left) * (other.bottom - other.top)
+        return overlap / (area + otherArea - overlap)
+    }
+
     companion object {
         fun read(value: JSONArray) = Region(
             value.getDouble(0).toFloat(), value.getDouble(1).toFloat(),
