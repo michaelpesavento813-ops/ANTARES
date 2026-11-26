@@ -34,9 +34,13 @@ class AcceptanceRunner : Instrumentation() {
         try {
             val checkStarted = SystemClock.elapsedRealtime()
             val resolver = targetContext.contentResolver
+            val subjectName = "Acceptance subject ${System.nanoTime()}"
+            val active = ProjectStore(targetContext).use { it.addProject(subjectName) }
+            val prefs = targetContext.getSharedPreferences("workspace", android.content.Context.MODE_PRIVATE)
+            check(prefs.edit().putLong("project", active).remove("photo").commit())
             val mainActivity = startActivitySync(Intent(targetContext, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            verifyWorkflowRoutes(mainActivity)
+            verifyWorkflowRoutes(mainActivity, subjectName)
             check(android.os.Build.VERSION.SDK_INT == 35) { "Acceptance requires API 35" }
             val fixture = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
             fixture.eraseColor(Color.rgb(30, 75, 105))
@@ -74,7 +78,7 @@ class AcceptanceRunner : Instrumentation() {
             val batchCsvTarget = doc("project_output.csv", "text/csv")
             val recoveryTarget = doc("interrupted_output.json", "application/json")
             val pngTarget = doc("ant_grayscale.png", "image/png")
-            val project = ProjectStore(targetContext).use { it.addProject("Acceptance ${System.nanoTime()}") }
+            val project = active
 
             fun submit(kind: String, uri: Uri? = null, parent: Long? = null): Long =
                 ProjectStore(targetContext).use { it.queue(project, kind, uri?.toString().orEmpty(), "Test $kind", parent) }
@@ -198,7 +202,47 @@ class AcceptanceRunner : Instrumentation() {
                 val duplicate = await(submit("import", source))
                 check(duplicate.hash == photo.hash && duplicate.detail.contains("Exact SHA-256 match"))
             }
-            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection, reopened queue, and 12 idle handoffs. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
+            val backupTarget = doc("ant_subject.zip", "application/zip")
+            val brokenTarget = doc("ant_truncated_subject.zip", "application/zip")
+            val independent = ProjectStore(targetContext).use { it.addProject("Separate subject ${System.nanoTime()}") }
+            ProjectStore(targetContext).use { subjects ->
+                subjects.renameProject(project, "Renamed $subjectName")
+                check(subjects.projects().first { it.id == project }.name == "Renamed $subjectName")
+                check(subjects.photos(independent).isEmpty())
+                check(runCatching { subjects.queue(independent, "scan", "", "Invalid reference", imported) }.isFailure)
+            }
+            val archive = SubjectArchive(targetContext)
+            archive.backup(project, backupTarget)
+            val archiveBytes = read(backupTarget)
+            resolver.openOutputStream(brokenTarget, "wt")!!.use { it.write(archiveBytes, 0, archiveBytes.size / 2) }
+            ProjectStore(targetContext).use { subjects ->
+                val known = subjects.projects()
+                check(runCatching { archive.restore(brokenTarget) }.isFailure)
+                check(subjects.projects() == known)
+            }
+            val restored = archive.restore(backupTarget)
+            check(restored != project && restored != independent)
+            ProjectStore(targetContext).use { subjects ->
+                val oldRows = subjects.snapshot(project)
+                val newRows = subjects.snapshot(restored)
+                check(oldRows.size == newRows.size && newRows.all { it.projectId == restored })
+                check(newRows.map { it.id }.toSet().intersect(oldRows.map { it.id }.toSet()).isEmpty())
+                check(subjects.photos(restored).map { it.hash } == subjects.photos(project).map { it.hash })
+                val restoredScan = subjects.confirmedScans(restored).single()
+                val rawScan = JSONObject(outputFile(targetContext, restoredScan.id, "json").readText())
+                val restoredPhoto = rawScan.getJSONArray("results").getJSONObject(0).getLong("imageId")
+                check(rawScan.getLong("projectId") == restored)
+                check(subjects.task(restoredPhoto)?.projectId == restored)
+                val pending = subjects.queue(independent, "import", "", "Pending database safety check")
+                check(runCatching { subjects.deleteProject(independent) }.isFailure)
+                check(subjects.task(pending)?.projectId == independent)
+                subjects.fail(pending, "Cancelled")
+                subjects.deleteProject(project)
+                check(subjects.projects().none { it.id == project })
+                check(subjects.photos(restored).isNotEmpty() && subjects.projects().any { it.id == independent })
+            }
+            check(read(source).contentEquals(bytes) && read(portrait).contentEquals(portraitBytes))
+            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection, reopened queue, and 12 idle handoffs. Subject creation, rename, isolation, verified backup, truncated restore rollback, remapped restore and pending-delete rejection passed. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
             finish(Activity.RESULT_OK, report)
         } catch (error: Throwable) {
             report.putString("stream", "\nFAIL: ${error.stackTraceToString()}\n")
@@ -208,7 +252,7 @@ class AcceptanceRunner : Instrumentation() {
         }
     }
 
-    private fun verifyWorkflowRoutes(main: Activity) {
+    private fun verifyWorkflowRoutes(main: Activity, subjectName: String) {
         for (workflow in Workflow.entries) {
             val monitor = addMonitor(WorkflowActivity::class.java.name, null, false)
             runOnMainSync {
@@ -220,6 +264,7 @@ class AcceptanceRunner : Instrumentation() {
             runOnMainSync {
                 val contents = screen.findViewById<View>(android.R.id.content)
                 check(view(contents, workflow.title) is TextView)
+                check(view(contents, "SUBJECT · $subjectName") is TextView)
                 val action = if (workflow == Workflow.COMPOSITE) "Confirm and add reference" else "Confirm subject and start"
                 check(view(contents, action)?.isEnabled == false)
                 requireNotNull(view(contents, "Cancel workflow") as? Button).performClick()

@@ -70,6 +70,13 @@ class WorkflowActivity : Activity() {
         scroll.addView(root)
         setContentView(scroll)
         label(workflow.title, 25f)
+        val activeSubject = store.projects().firstOrNull { it.id == projectId }
+        if (activeSubject == null) {
+            label("Select a subject on the main screen before processing.", 17f)
+            button("Return to subjects") { finish() }
+            return
+        }
+        label("SUBJECT · ${activeSubject.name}", 16f)
         progress = label("Choose the subject before starting.", 16f)
         button("Choose photograph") { pickPhoto() }
         preview = SubjectView(this) { updateStatus() }
@@ -120,6 +127,7 @@ class WorkflowActivity : Activity() {
 
     override fun onSaveInstanceState(state: Bundle) {
         state.putLong("photo", photoId)
+        if (!::preview.isInitialized) return
         state.putString("selected", preview.selection?.json()?.toString())
         state.putString("references", JSONArray(references.map { it.json() }).toString())
         state.putInt("mode", choices.checkedRadioButtonId)

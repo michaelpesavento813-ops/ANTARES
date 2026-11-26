@@ -1,7 +1,7 @@
 name: Build and test ANTARES
 on:
   push:
-    branches: [main, native-android, subject-workflows]
+    branches: [main, native-android, subject-workflows, subject-databases]
   pull_request:
     branches: [main]
   workflow_dispatch:

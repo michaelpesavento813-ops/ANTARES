@@ -13,7 +13,8 @@ internal class ProjectStore(context: Context) :
     data class Task(
         val id: Long, val projectId: Long, val kind: String, val input: String,
         val label: String, val status: String, val detail: String, val parent: Long?,
-        val hash: String?, val bytes: Long, val width: Int, val height: Int
+        val hash: String?, val bytes: Long, val width: Int, val height: Int,
+        val orientation: Int, val perceptualHash: String?, val created: Long
     ) {
         val imageAlias: String get() = exportName("IMG", id, "IMG").substringBefore('.')
     }
@@ -53,16 +54,62 @@ internal class ProjectStore(context: Context) :
         put("name", name.trim().also { require(it.isNotEmpty() && it.length <= 80) })
     })
 
+    fun renameProject(id: Long, name: String) {
+        val title = name.trim()
+        require(title.isNotEmpty() && title.length <= 80) { "Enter a subject name with 1 to 80 characters" }
+        check(writableDatabase.update("project", ContentValues().apply { put("name", title) },
+            "id=?", arrayOf(id.toString())) == 1) { "Subject no longer exists" }
+    }
+
+    fun snapshot(project: Long): List<Task> {
+        val rows = tasks("WHERE project_id=? ORDER BY id", arrayOf(project.toString()))
+        require(rows.none { it.status == "queued" }) { "Wait for this subject's active jobs before continuing" }
+        return rows
+    }
+
+    fun deleteProject(project: Long): List<Long> {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val rows = snapshot(project)
+            val arguments = arrayOf(project.toString())
+            database.execSQL("UPDATE task SET parent=NULL WHERE project_id=?", arguments)
+            database.delete("task", "project_id=?", arguments)
+            check(database.delete("project", "id=?", arguments) == 1) { "Subject no longer exists" }
+            database.setTransactionSuccessful()
+            return rows.map { it.id }
+        } finally { database.endTransaction() }
+    }
+
+    fun restoreTask(project: Long, row: Task, input: String, parent: Long?): Long {
+        val newId = queue(project, row.kind, input, row.label, parent)
+        update(newId, ContentValues().apply {
+            put("status", row.status)
+            put("detail", row.detail)
+            put("hash", row.hash)
+            put("bytes", row.bytes)
+            put("width", row.width)
+            put("height", row.height)
+            put("orientation", row.orientation)
+            put("perceptual_hash", row.perceptualHash)
+            put("created", row.created)
+        })
+        return newId
+    }
+
     fun queue(
         project: Long, kind: String, input: String, label: String, parent: Long? = null
-    ): Long = writableDatabase.insertOrThrow("task", null, ContentValues().apply {
-        put("project_id", project)
-        put("kind", kind)
-        put("input", input)
-        put("label", label)
-        put("parent", parent)
-        put("created", System.currentTimeMillis())
-    })
+    ): Long {
+        if (parent != null) require(task(parent)?.projectId == project) { "Referenced record belongs to another subject" }
+        return writableDatabase.insertOrThrow("task", null, ContentValues().apply {
+            put("project_id", project)
+            put("kind", kind)
+            put("input", input)
+            put("label", label)
+            put("parent", parent)
+            put("created", System.currentTimeMillis())
+        })
+    }
 
     fun queueBatch(project: Long): Long {
         val db = writableDatabase
@@ -91,14 +138,14 @@ internal class ProjectStore(context: Context) :
     }
 
     private fun tasks(where: String, arguments: Array<String>): List<Task> = readableDatabase.rawQuery(
-        "SELECT id,project_id,kind,input,label,status,detail,parent,hash,bytes,width,height FROM task $where", arguments
+        "SELECT id,project_id,kind,input,label,status,detail,parent,hash,bytes,width,height,orientation,perceptual_hash,created FROM task $where", arguments
     ).use {
         buildList {
             while (it.moveToNext()) add(Task(
                 it.getLong(0), it.getLong(1), it.getString(2), it.getString(3),
                 it.getString(4), it.getString(5), it.getString(6),
                 if (it.isNull(7)) null else it.getLong(7), it.getString(8),
-                it.getLong(9), it.getInt(10), it.getInt(11)
+                it.getLong(9), it.getInt(10), it.getInt(11), it.getInt(12), it.getString(13), it.getLong(14)
             ))
         }
     }

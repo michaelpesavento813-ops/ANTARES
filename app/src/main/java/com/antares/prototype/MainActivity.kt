@@ -11,6 +11,10 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.widget.Button
+import android.widget.ImageView
+import android.widget.PopupMenu
+import java.util.concurrent.Executors
+import kotlin.concurrent.withLock
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -24,19 +28,23 @@ class MainActivity : Activity() {
     private val db by lazy { ProjectStore(applicationContext) }
     private val settings by lazy { getSharedPreferences("workspace", MODE_PRIVATE) }
     private val handler = Handler(Looper.getMainLooper())
-    private var projectId = 1L
+    private var projectId = 0L
     private var photoId = 0L
     private var pendingResult = 0L
     private var lastUi: List<Any> = emptyList()
 
-    private lateinit var projectLabel: TextView
+    private lateinit var projectLabel: Button
+    private lateinit var filesMenu: Button
+    private lateinit var thumbnail: ImageView
+    private val background = Executors.newSingleThreadExecutor()
+    private var renderedPhoto = 0L
+    private var picture: android.graphics.Bitmap? = null
+    private var archiveBusy = false
+    private var archiveSubject = 0L
+    private var deleteAfterBackup = false
     private lateinit var photoLabel: TextView
     private lateinit var jobsLabel: TextView
     private lateinit var progress: ProgressBar
-    private lateinit var saveJson: Button
-    private lateinit var saveCsv: Button
-    private lateinit var savePng: Button
-    private lateinit var retry: Button
 
     private val refresh = object : Runnable {
         override fun run() {
@@ -47,9 +55,11 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        projectId = savedInstanceState?.getLong("project") ?: settings.getLong("project", 1L)
+        projectId = savedInstanceState?.getLong("project") ?: settings.getLong("project", 0L)
         photoId = savedInstanceState?.getLong("photo") ?: settings.getLong("photo", 0L)
         pendingResult = savedInstanceState?.getLong("pending") ?: settings.getLong("pending", 0L)
+        archiveSubject = savedInstanceState?.getLong("archiveSubject") ?: settings.getLong("archiveSubject", 0L)
+        deleteAfterBackup = savedInstanceState?.getBoolean("deleteAfterBackup") ?: settings.getBoolean("deleteAfterBackup", false)
 
         val scroll = ScrollView(this)
         val body = LinearLayout(this).apply {
@@ -63,7 +73,18 @@ class MainActivity : Activity() {
             view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
             insets
         }
-        screen.addView(TextView(this).apply { text = "ANTARES"; textSize = 24f; setPadding(20, 8, 20, 4) })
+        val subjectBar = LinearLayout(this)
+        screen.addView(subjectBar)
+        projectLabel = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener { guarded { chooseProject() } }
+        }
+        subjectBar.addView(projectLabel, LinearLayout.LayoutParams(0, -2, 1f))
+        subjectBar.addView(Button(this).apply {
+            text = "•••"
+            contentDescription = "SUBJECT Management"
+            setOnClickListener { guarded { manageSubjects(this) } }
+        }, LinearLayout.LayoutParams(-2, -2))
         Workflow.entries.chunked(2).forEach { pair ->
             val row = LinearLayout(this)
             screen.addView(row)
@@ -78,19 +99,14 @@ class MainActivity : Activity() {
         scroll.addView(body)
         screen.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(screen)
-        projectLabel = text(body, "", 20f)
-        action(body, "Choose project") { chooseProject() }
-        action(body, "New project") { newProject() }
-        action(body, "Add photos") { pickPhotos() }
         photoLabel = text(body, "", 17f)
-        action(body, "Choose imported photo") { choosePhoto() }
-        action(body, "Combine confirmed scans for export") { chooseScansForBatch() }
-        saveJson = action(body, "Save As JSON") { save(JSON) }
-        saveCsv = action(body, "Save As CSV") { save(CSV) }
-        savePng = action(body, "Save As PNG") { save(PNG) }
-        action(body, "Preferred export folder") {
-            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), FOLDER)
+        thumbnail = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = "Active subject photograph preview"
+            setOnClickListener { guarded { choosePhoto() } }
         }
+        body.addView(thumbnail, LinearLayout.LayoutParams(-1, (245 * resources.displayMetrics.density).toInt()))
+        filesMenu = action(body, "Photos and files") { openFilesMenu() }
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             isIndeterminate = true
             visibility = View.GONE
@@ -98,9 +114,6 @@ class MainActivity : Activity() {
             body.addView(this, LinearLayout.LayoutParams(-1, -2))
         }
         jobsLabel = text(body, "", 15f)
-        action(body, "Open saved file") { openExport() }
-        retry = action(body, "Retry failed job") { retryJob() }
-        action(body, "System health") { showHealth() }
     }
 
     override fun onStart() {
@@ -115,6 +128,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        background.shutdown()
+        picture?.recycle()
         db.close()
         super.onDestroy()
     }
@@ -123,13 +138,25 @@ class MainActivity : Activity() {
         outState.putLong("project", projectId)
         outState.putLong("photo", photoId)
         outState.putLong("pending", pendingResult)
+        outState.putLong("archiveSubject", archiveSubject)
+        outState.putBoolean("deleteAfterBackup", deleteAfterBackup)
         super.onSaveInstanceState(outState)
     }
 
     private fun redraw() {
-        val project = db.projects().firstOrNull { it.id == projectId } ?: db.projects().first().also {
-            projectId = it.id
-            photoId = 0L
+        val project = db.projects().firstOrNull { it.id == projectId }
+        if (project == null) {
+            projectId = 0
+            photoId = 0
+            projectLabel.text = "Active SUBJECT ▾"
+            photoLabel.text = "Select or create a subject."
+            filesMenu.isEnabled = false
+            showPreview(null)
+            if (!archiveBusy) {
+                progress.visibility = View.GONE
+                jobsLabel.text = ""
+            }
+            return
         }
         val latest = db.recent(project.id)
         val chosen = db.task(photoId)?.takeIf {
@@ -140,22 +167,42 @@ class MainActivity : Activity() {
             rememberSelection()
         }
         val queued = db.queuedCount(project.id)
-        val key = listOf(project, latest, photoId, queued)
+        val key = listOf(project, latest, photoId, queued, archiveBusy)
         if (lastUi == key) return
         lastUi = key
-        projectLabel.text = project.name
-        photoLabel.text = chosen?.let { "${it.label}\n${it.imageAlias} · ${it.width} × ${it.height}" }
-            ?: "Add photos to get started."
-        val hasScan = result("scan") != null || db.latestBatch(projectId) != null
-        saveJson.isEnabled = hasScan
-        saveCsv.isEnabled = hasScan
-        savePng.isEnabled = result("png") != null
-        retry.isEnabled = latest.any { it.status == "failed" }
-        progress.visibility = if (queued > 0) View.VISIBLE else View.GONE
-        val heading = if (queued > 0) "Active and queued jobs · $queued" else "Recent work"
-        jobsLabel.text = latest.take(8).joinToString("\n\n", prefix = "$heading\n\n") {
-            "${it.label}\n${status(it)}"
-        }.trimEnd()
+        projectLabel.text = "${project.name}  ▾"
+        projectLabel.contentDescription = "Active SUBJECT ${project.name}"
+        photoLabel.text = chosen?.let { "${it.label} · ${it.imageAlias}" } ?: "Add reference photos."
+        filesMenu.isEnabled = true
+        showPreview(chosen)
+        progress.visibility = if (queued > 0 || archiveBusy) View.VISIBLE else View.GONE
+        if (!archiveBusy) {
+            jobsLabel.text = when {
+                queued > 0 -> "Working · $queued active or queued"
+                latest.isNotEmpty() -> status(latest.first()).substringBefore('\n')
+                else -> "Ready"
+            }
+        }
+    }
+
+    private fun showPreview(photo: ProjectStore.Task?) {
+        val id = photo?.id ?: 0
+        if (renderedPhoto == id) return
+        renderedPhoto = id
+        thumbnail.setImageDrawable(null)
+        picture?.recycle()
+        picture = null
+        val hash = photo?.hash ?: return
+        background.execute {
+            val bitmap = runCatching { upright(originalFile(this, hash), 640) }.getOrNull()
+            runOnUiThread {
+                if (isDestroyed || renderedPhoto != id) bitmap?.recycle()
+                else {
+                    picture = bitmap
+                    thumbnail.setImageBitmap(bitmap)
+                }
+            }
+        }
     }
 
     private fun status(task: ProjectStore.Task): String = when (task.status) {
@@ -166,36 +213,171 @@ class MainActivity : Activity() {
 
     private fun chooseProject() {
         val projects = db.projects()
-        AlertDialog.Builder(this).setTitle("Choose project")
-            .setItems(projects.map { it.name }.toTypedArray()) { _, index ->
-                selectProject(projects[index].id)
-            }.show()
+        val dialog = AlertDialog.Builder(this).setTitle("Active SUBJECT")
+            .setNeutralButton("Create SUBJECT", { _, _ -> projectName(null) })
+            .setNegativeButton("Cancel", null)
+        if (projects.isEmpty()) dialog.setMessage("Create a subject before beginning processing.")
+        else dialog.setItems(projects.map { it.name }.toTypedArray()) { _, index -> selectProject(projects[index].id) }
+        dialog.show()
     }
 
     private fun selectProject(id: Long) {
         projectId = id
         photoId = 0L
+        lastUi = emptyList()
         rememberSelection()
         redraw()
     }
 
-    private fun newProject() {
-        val input = EditText(this).apply { hint = "Project name"; isSingleLine = true }
-        val alert = AlertDialog.Builder(this).setTitle("New project").setView(input)
-            .setNegativeButton("Cancel", null).setPositiveButton("Create", null).create()
+    private fun manageSubjects(anchor: View) {
+        val active = db.projects().firstOrNull { it.id == projectId }
+        val menu = PopupMenu(this, anchor)
+        val options = listOf("Create SUBJECT Database", "Rename SUBJECT Database", "Backup SUBJECT Database",
+            "Restore SUBJECT Database", "Delete SUBJECT Database")
+        options.forEachIndexed { index, label ->
+            menu.menu.add(0, index, index, label).isEnabled = !archiveBusy && (index in listOf(0, 3) || active != null)
+        }
+        menu.setOnMenuItemClickListener { item ->
+            guarded {
+                when (item.itemId) {
+                    0 -> projectName(null)
+                    1 -> projectName(requireNotNull(active))
+                    2 -> startBackup(requireNotNull(active), false)
+                    3 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        type = "application/zip"
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                    }, RESTORE)
+                    4 -> confirmDelete(requireNotNull(active))
+                }
+            }
+            true
+        }
+        menu.show()
+    }
+
+    private fun projectName(project: ProjectStore.Project?) {
+        val input = EditText(this).apply {
+            hint = "Subject name"
+            isSingleLine = true
+            setText(project?.name.orEmpty())
+        }
+        val action = if (project == null) "Create" else "Rename"
+        val alert = AlertDialog.Builder(this).setTitle("$action SUBJECT Database").setView(input)
+            .setNegativeButton("Cancel", null).setPositiveButton(action, null).create()
         alert.setOnShowListener {
             alert.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 try {
-                    selectProject(db.addProject(input.text.toString()))
+                    if (project == null) selectProject(db.addProject(input.text.toString()))
+                    else {
+                        db.renameProject(project.id, input.text.toString())
+                        lastUi = emptyList()
+                        redraw()
+                    }
                     alert.dismiss()
                 } catch (_: SQLiteConstraintException) {
-                    input.error = "A project with this name already exists."
+                    input.error = "A subject with this name already exists."
                 } catch (_: IllegalArgumentException) {
                     input.error = "Enter a name with 1 to 80 characters."
                 }
             }
         }
         alert.show()
+    }
+
+    private fun confirmDelete(project: ProjectStore.Project, backedUp: Boolean = false) {
+        val rows = db.snapshot(project.id)
+        val photos = rows.count { it.kind == "import" }
+        val dialog = AlertDialog.Builder(this).setTitle("Delete SUBJECT ${project.name}?")
+            .setMessage("This removes this subject’s $photos photo records, analysis, composites, history, and settings. Original photos outside ANTARES and source copies used by other subjects remain intact.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete ${project.name}") { _, _ ->
+                guarded {
+                    archiveWork("Deleting subject…", {
+                        subjectArchiveLock.withLock {
+                            val removed = ProjectStore(applicationContext).use { it.deleteProject(project.id) }
+                            removed.forEach { id ->
+                                listOf("json", "csv", "png", "export").forEach { outputFile(this, id, it).delete() }
+                            }
+                            settings.edit().remove("exportFolder:${project.id}").apply()
+                        }
+                    }) {
+                        if (projectId == project.id) selectProject(0)
+                        message("Deleted subject ${project.name}.")
+                    }
+                }
+            }
+        if (!backedUp) dialog.setNeutralButton("Back up first") { _, _ -> guarded { startBackup(project, true) } }
+        dialog.show()
+    }
+
+    private fun startBackup(project: ProjectStore.Project, thenDelete: Boolean) {
+        db.snapshot(project.id)
+        archiveSubject = project.id
+        deleteAfterBackup = thenDelete
+        settings.edit().putLong("archiveSubject", archiveSubject).putBoolean("deleteAfterBackup", thenDelete).apply()
+        startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            type = "application/zip"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_TITLE, "ANTARES-subject-${project.id}.zip")
+            val folder = settings.getString("exportFolder:${project.id}", null)
+            if (folder != null) putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(folder))
+        }, BACKUP)
+    }
+
+    private fun <T> archiveWork(label: String, work: () -> T, finished: (T) -> Unit) {
+        check(!archiveBusy) { "A subject backup or restore is already running" }
+        archiveBusy = true
+        jobsLabel.text = label
+        progress.visibility = View.VISIBLE
+        background.execute {
+            val result = runCatching(work)
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                archiveBusy = false
+                progress.visibility = View.GONE
+                lastUi = emptyList()
+                result.fold(onSuccess = finished, onFailure = {
+                    jobsLabel.text = it.message ?: "Operation failed."
+                    message(jobsLabel.text.toString())
+                })
+                redraw()
+            }
+        }
+    }
+
+    private fun openFilesMenu() {
+        val menu = PopupMenu(this, filesMenu)
+        val options = listOf(
+            "Add photos", "Choose imported photo", "Save As JSON", "Save As CSV", "Save As PNG",
+            "Group confirmed scans for export", "Open saved file", "Preferred export folder", "Retry failed job", "System health"
+        )
+        val scanReady = result("scan") != null || db.latestBatch(projectId) != null
+        options.forEachIndexed { index, label ->
+            menu.menu.add(0, index, index, label).isEnabled = when (index) {
+                2, 3 -> scanReady
+                4 -> result("png") != null
+                8 -> db.recent(projectId).any { it.status == "failed" }
+                else -> true
+            }
+        }
+        menu.setOnMenuItemClickListener { item ->
+            guarded {
+                when (item.itemId) {
+                    0 -> pickPhotos()
+                    1 -> choosePhoto()
+                    2 -> save(JSON)
+                    3 -> save(CSV)
+                    4 -> save(PNG)
+                    5 -> chooseScansForBatch()
+                    6 -> openExport()
+                    7 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), FOLDER)
+                    8 -> retryJob()
+                    9 -> showHealth()
+                }
+            }
+            true
+        }
+        menu.show()
     }
 
     private fun choosePhoto() {
@@ -225,6 +407,10 @@ class MainActivity : Activity() {
     }
 
     private fun launchWorkflow(workflow: Workflow) {
+        if (projectId == 0L) {
+            chooseProject()
+            return
+        }
         startActivityForResult(Intent(this, WorkflowActivity::class.java)
             .putExtra("workflow", workflow.name).putExtra("project", projectId)
             .putExtra("photo", photoId), WORKFLOW)
@@ -284,7 +470,7 @@ class MainActivity : Activity() {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = mime
             putExtra(Intent.EXTRA_TITLE, filename)
-            val folder = settings.getString("exportFolder", null)
+            val folder = settings.getString("exportFolder:$projectId", null)
             if (folder != null) putExtra(DocumentsContract.EXTRA_INITIAL_URI, Uri.parse(folder))
         }, format)
     }
@@ -300,6 +486,22 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK || data == null) return
         guarded {
             when (requestCode) {
+                BACKUP -> {
+                    val destination = data.data ?: return@guarded
+                    val subject = archiveSubject
+                    val promptDelete = deleteAfterBackup
+                    archiveWork("Backing up subject…", { SubjectArchive(applicationContext).backup(subject, destination) }) { saved ->
+                        message("Verified backup saved as $saved.")
+                        if (promptDelete) db.projects().firstOrNull { it.id == subject }?.let { confirmDelete(it, true) }
+                    }
+                }
+                RESTORE -> {
+                    val source = data.data ?: return@guarded
+                    archiveWork("Restoring subject…", { SubjectArchive(applicationContext).restore(source) }) { restored ->
+                        selectProject(restored)
+                        message("Subject restored.")
+                    }
+                }
                 WORKFLOW -> {
                     photoId = data.getLongExtra("photo", photoId)
                     rememberSelection()
@@ -326,7 +528,7 @@ class MainActivity : Activity() {
                     val initial = DocumentsContract.buildDocumentUriUsingTree(
                         folder, DocumentsContract.getTreeDocumentId(folder)
                     )
-                    settings.edit().putString("exportFolder", initial.toString()).apply()
+                    settings.edit().putString("exportFolder:$projectId", initial.toString()).apply()
                     message("Preferred folder saved.")
                 }
                 JSON, CSV, PNG -> {
@@ -349,7 +551,7 @@ class MainActivity : Activity() {
 
     private fun openExport() {
         val exports = db.recent(projectId).filter {
-            it.status == "done" && it.kind in setOf("csv", "json", "save_png")
+            it.status == "done" && it.input.isNotEmpty() && it.kind in setOf("csv", "json", "save_png")
         }
         if (exports.isEmpty()) {
             message("Save a result first.")
@@ -428,6 +630,8 @@ class MainActivity : Activity() {
         const val IMPORT = 10
         const val FOLDER = 11
         const val WORKFLOW = 12
+        const val BACKUP = 13
+        const val RESTORE = 14
         const val JSON = 20
         const val CSV = 21
         const val PNG = 22
