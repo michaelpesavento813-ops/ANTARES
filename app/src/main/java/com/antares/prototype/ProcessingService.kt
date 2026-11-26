@@ -112,13 +112,14 @@ internal fun documentName(context: Context, uri: Uri): String =
 private class Processor(private val context: Context, private val db: ProjectStore) : AutoCloseable {
     private val resolver get() = context.contentResolver
     private var detector: FaceLandmarker? = null
+    private var subjectDetector: FaceLandmarker? = null
 
     fun run(task: ProjectStore.Task) {
         when (task.kind) {
             "import" -> import(task)
             "scan" -> scan(task)
             "batch" -> batch(task)
-            "png" -> preview(task)
+            "png" -> if (task.input.isEmpty()) preview(task) else appearance(task)
             "json", "csv", "save_png" -> export(task)
             else -> error("Unknown job")
         }
@@ -163,21 +164,27 @@ private class Processor(private val context: Context, private val db: ProjectSto
         val photo = imported(task)
         val file = originalFile(context, requireNotNull(photo.hash))
         val bitmap = upright(file, 2048)
+        val request = task.input.takeIf { it.isNotEmpty() }?.let(WorkflowRequest::decode)
+        val region = request?.also {
+            require(it.flow == Workflow.SCAN && it.references.single().photoId == photo.id)
+        }?.references?.single()?.region
+        val area = region?.pixels(bitmap.width, bitmap.height)
+        val selected = if (area != null) Bitmap.createBitmap(bitmap, area.left, area.top, area.width(), area.height()) else bitmap
         val document = try {
-            val current = detector ?: FaceLandmarker.createFromOptions(
-                context, FaceLandmarker.FaceLandmarkerOptions.builder()
-                    .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").build())
-                    .setNumFaces(1)
-                    .setOutputFaceBlendshapes(false)
-                    .setOutputFacialTransformationMatrixes(false)
-                    .build()
-            ).also { detector = it }
-            val image = BitmapImageBuilder(bitmap).build()
+            val current = if (region == null) {
+                detector ?: createDetector(1).also { detector = it }
+            } else {
+                subjectDetector ?: createDetector(2).also { subjectDetector = it }
+            }
+            val image = BitmapImageBuilder(selected).build()
             val faces = try { current.detect(image).faceLandmarks() } finally { image.close() }
+            require(faces.size < 2) { "The confirmed region still contains multiple faces. Select a smaller area" }
             val points = JSONArray()
             faces.firstOrNull()?.forEach { point ->
-                points.put(JSONObject().put("x", point.x().toDouble())
-                    .put("y", point.y().toDouble()).put("z", point.z().toDouble()))
+                val x = if (area == null) point.x().toDouble() else (area.left + point.x() * area.width()) / bitmap.width.toDouble()
+                val y = if (area == null) point.y().toDouble() else (area.top + point.y() * area.height()) / bitmap.height.toDouble()
+                points.put(JSONObject().put("x", x).put("y", y).put("z", point.z().toDouble())
+                    .put("confidence", JSONObject.NULL))
             }
             check(points.length() == 0 || points.length() == 478) { "Unexpected landmark count" }
             val record = JSONObject()
@@ -185,19 +192,75 @@ private class Processor(private val context: Context, private val db: ProjectSto
                 .put("imageId", photo.id).put("bytes", photo.bytes).put("sha256", photo.hash)
                 .put("width", bitmap.width).put("height", bitmap.height)
                 .put("sourceWidth", photo.width).put("sourceHeight", photo.height)
+                .put("sourceExifOrientation", orientation(file))
                 .put("status", if (points.length() == 0) "no_face" else "detected")
                 .put("landmarkCount", points.length()).put("landmarks", points)
+            if (request != null) record.put("selection", JSONObject(request.encode()))
+                .put("measurement", "estimated")
+                .put("coordinateSystem", "normalized upright source x,y; selected crop model-relative z")
+                .put("confidenceStatus", "per-landmark confidence unavailable")
+                .put("settings", JSONObject().put("delegate", "CPU").put("runningMode", "IMAGE")
+                    .put("numFaces", 2).put("runtimeVersion", "1.2.3"))
             JSONObject().put("schema", "antares-face-landmarks-v1")
                 .put("model", "mediapipe-face-landmarker-float16-v1")
                 .put("coordinateSystem", "normalized image x,y; model-relative z")
                 .put("projectId", task.projectId).put("batchId", task.id)
                 .put("results", JSONArray().put(record))
         } finally {
+            if (selected !== bitmap) selected.recycle()
             bitmap.recycle()
         }
         atomic(outputFile(context, task.id, "json")) { it.write(document.toString().toByteArray(Charsets.UTF_8)) }
         val result = document.getJSONArray("results").getJSONObject(0)
         db.complete(task.id, if (result.getInt("landmarkCount") == 0) "No face detected." else "478 landmarks ready.")
+    }
+
+    private fun createDetector(maxFaces: Int): FaceLandmarker = FaceLandmarker.createFromOptions(
+        context, FaceLandmarker.FaceLandmarkerOptions.builder()
+            .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").build())
+            .setNumFaces(maxFaces).setOutputFaceBlendshapes(false)
+            .setOutputFacialTransformationMatrixes(false).build()
+    )
+
+    private fun appearance(task: ProjectStore.Task) {
+        val request = WorkflowRequest.decode(task.input)
+        require(request.references.first().photoId == task.parent)
+        fun photo(reference: SubjectReference): Bitmap {
+            val source = db.task(reference.photoId)?.takeIf {
+                it.kind == "import" && it.status == "done" && it.projectId == task.projectId
+            } ?: error("A confirmed reference is unavailable")
+            val file = originalFile(context, requireNotNull(source.hash))
+            if (request.flow == Workflow.COMPOSITE) return upright(file, 2048)
+            val size = bounds(file)
+            require(size.outWidth.toLong() * size.outHeight <= 12_500_000L) {
+                "This edit requires an image of 12.5 megapixels or less to preserve all outside pixels"
+            }
+            return upright(file, maxOf(size.outWidth, size.outHeight))
+        }
+        val result = if (request.flow == Workflow.COMPOSITE) {
+            val crops = mutableListOf<Bitmap>()
+            try {
+                for (reference in request.references) {
+                    val source = photo(reference)
+                    try {
+                        val area = reference.region.pixels(source.width, source.height)
+                        val crop = Bitmap.createBitmap(source, area.left, area.top, area.width(), area.height())
+                        crops.add(if (crop === source) requireNotNull(crop.copy(Bitmap.Config.ARGB_8888, false)) else crop)
+                    } finally { source.recycle() }
+                }
+                composite(crops, sideBySide = request.settings == 0)
+            } finally { crops.forEach { it.recycle() } }
+        } else {
+            val reference = request.references.single()
+            val source = photo(reference)
+            try { applyAppearance(source, reference.region, request) } finally { source.recycle() }
+        }
+        try {
+            atomic(outputFile(context, task.id, "png")) { output ->
+                check(result.compress(Bitmap.CompressFormat.PNG, 100, output)) { "PNG encoder failed" }
+            }
+        } finally { result.recycle() }
+        db.complete(task.id, "${request.flow.title} result ready. Use Save As PNG.")
     }
 
     private fun scans(task: ProjectStore.Task): Sequence<ProjectStore.Task> =
@@ -304,7 +367,10 @@ private class Processor(private val context: Context, private val db: ProjectSto
         marker.delete()
     }
 
-    override fun close() { detector?.close() }
+    override fun close() {
+        detector?.close()
+        subjectDetector?.close()
+    }
 }
 
 private fun uri(value: String) = Uri.parse(value).also {

@@ -12,8 +12,8 @@ android {
         testInstrumentationRunner = "com.antares.prototype.AcceptanceRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0-dev"
+        versionCode = 4
+        versionName = "0.4.0-dev"
     }
     val keystore = providers.environmentVariable("ANTARES_SIGNING_KEYSTORE").orNull
     if (keystore != null) {

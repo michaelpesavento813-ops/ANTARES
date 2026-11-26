@@ -33,8 +33,6 @@ class MainActivity : Activity() {
     private lateinit var photoLabel: TextView
     private lateinit var jobsLabel: TextView
     private lateinit var progress: ProgressBar
-    private lateinit var scan: Button
-    private lateinit var grayscale: Button
     private lateinit var saveJson: Button
     private lateinit var saveCsv: Button
     private lateinit var savePng: Button
@@ -59,26 +57,37 @@ class MainActivity : Activity() {
             val padding = (20 * resources.displayMetrics.density).toInt()
             setPadding(padding, padding, padding, padding)
         }
-        scroll.setOnApplyWindowInsetsListener { view, insets ->
+        val screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        screen.setOnApplyWindowInsetsListener { view, insets ->
             @Suppress("DEPRECATION")
             view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
             insets
         }
+        screen.addView(TextView(this).apply { text = "ANTARES"; textSize = 24f; setPadding(20, 8, 20, 4) })
+        Workflow.entries.chunked(2).forEach { pair ->
+            val row = LinearLayout(this)
+            screen.addView(row)
+            pair.forEach { workflow ->
+                row.addView(Button(this).apply {
+                    text = workflow.title
+                    isAllCaps = false
+                    setOnClickListener { guarded { launchWorkflow(workflow) } }
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+            }
+        }
         scroll.addView(body)
-        setContentView(scroll)
-        text(body, "ANTARES", 28f)
+        screen.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        setContentView(screen)
         projectLabel = text(body, "", 20f)
         action(body, "Choose project") { chooseProject() }
         action(body, "New project") { newProject() }
         action(body, "Add photos") { pickPhotos() }
         photoLabel = text(body, "", 17f)
         action(body, "Choose imported photo") { choosePhoto() }
-        scan = action(body, "Deep Scan") { process("scan", "Deep Scan") }
-        action(body, "Deep Scan entire project") {
-            db.queueBatch(projectId)
+        action(body, "Combine confirmed scans for export") {
+            db.queueConfirmedBatch(projectId)
             kick()
         }
-        grayscale = action(body, "Grayscale preview") { process("png", "Grayscale preview") }
         saveJson = action(body, "Save As JSON") { save(JSON) }
         saveCsv = action(body, "Save As CSV") { save(CSV) }
         savePng = action(body, "Save As PNG") { save(PNG) }
@@ -140,8 +149,6 @@ class MainActivity : Activity() {
         projectLabel.text = project.name
         photoLabel.text = chosen?.let { "${it.label}\n${it.imageAlias} · ${it.width} × ${it.height}" }
             ?: "Add photos to get started."
-        scan.isEnabled = chosen != null
-        grayscale.isEnabled = chosen != null
         val hasScan = result("scan") != null || db.latestBatch(projectId) != null
         saveJson.isEnabled = hasScan
         saveCsv.isEnabled = hasScan
@@ -220,10 +227,10 @@ class MainActivity : Activity() {
         }, IMPORT)
     }
 
-    private fun process(kind: String, label: String) {
-        if (photoId == 0L) return
-        db.queue(projectId, kind, "", label, photoId)
-        kick()
+    private fun launchWorkflow(workflow: Workflow) {
+        startActivityForResult(Intent(this, WorkflowActivity::class.java)
+            .putExtra("workflow", workflow.name).putExtra("project", projectId)
+            .putExtra("photo", photoId), WORKFLOW)
     }
 
     private fun result(kind: String): ProjectStore.Task? {
@@ -272,6 +279,11 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK || data == null) return
         guarded {
             when (requestCode) {
+                WORKFLOW -> {
+                    photoId = data.getLongExtra("photo", photoId)
+                    rememberSelection()
+                    redraw()
+                }
                 IMPORT -> {
                     val uris = data.clipData?.let { clip ->
                         List(clip.itemCount) { clip.getItemAt(it).uri }
@@ -359,8 +371,8 @@ class MainActivity : Activity() {
         val details = buildString {
             appendLine("Projects and jobs: available")
             appendLine(if (modelAvailable) "Offline facial model: bundled" else "Offline facial model: unavailable")
-            appendLine("Grayscale preview: available")
-            append("Tattoo verification and full restoration: pending")
+            appendLine("Manual subject selection and four independent workflows: available")
+            append("Body mapping, tattoo verification and full restoration: pending")
         }
         AlertDialog.Builder(this).setTitle("System health").setMessage(details)
             .setPositiveButton("OK", null).show()
@@ -394,6 +406,7 @@ class MainActivity : Activity() {
     private companion object {
         const val IMPORT = 10
         const val FOLDER = 11
+        const val WORKFLOW = 12
         const val JSON = 20
         const val CSV = 21
         const val PNG = 22

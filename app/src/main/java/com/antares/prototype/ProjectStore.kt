@@ -77,6 +77,18 @@ internal class ProjectStore(context: Context) :
         } finally { db.endTransaction() }
     }
 
+    fun queueConfirmedBatch(project: Long): Long {
+        val scans = tasks(
+            """WHERE project_id=? AND kind='scan' AND status='done' AND input!=''
+                AND id IN (
+                    SELECT MAX(id) FROM task WHERE project_id=? AND kind='scan'
+                    AND status='done' AND input!='' GROUP BY parent
+                ) ORDER BY id""".trimIndent(), arrayOf(project.toString(), project.toString())
+        )
+        require(scans.isNotEmpty()) { "Confirm subjects and complete at least one Deep Scan first" }
+        return queue(project, "batch", scans.joinToString(",") { it.id.toString() }, "Confirmed project scans")
+    }
+
     private fun tasks(where: String, arguments: Array<String>): List<Task> = readableDatabase.rawQuery(
         "SELECT id,project_id,kind,input,label,status,detail,parent,hash,bytes,width,height FROM task $where", arguments
     ).use {
