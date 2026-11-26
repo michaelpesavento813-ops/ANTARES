@@ -15,6 +15,16 @@ android {
         versionCode = 3
         versionName = "0.3.0-dev"
     }
+    val keystore = providers.environmentVariable("ANTARES_SIGNING_KEYSTORE").orNull
+    if (keystore != null) {
+        val production = signingConfigs.create("production") {
+            storeFile = rootProject.file(keystore)
+            storePassword = providers.environmentVariable("ANTARES_SIGNING_STORE_PASSWORD").get()
+            keyAlias = providers.environmentVariable("ANTARES_SIGNING_KEY_ALIAS").get()
+            keyPassword = providers.environmentVariable("ANTARES_SIGNING_KEY_PASSWORD").get()
+        }
+        buildTypes.named("release") { signingConfig = production }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

@@ -289,6 +289,7 @@ class MainActivity : Activity() {
                 }
                 FOLDER -> {
                     val folder = data.data ?: return@guarded
+                    keepAccess(folder, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     val initial = DocumentsContract.buildDocumentUriUsingTree(
                         folder, DocumentsContract.getTreeDocumentId(folder)
                     )

@@ -31,6 +31,11 @@ jobs:
           cp app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk delivery/ANTARES-test.apk
           cd delivery
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs ANTARES-development.apk > signing.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump permissions ANTARES-development.apk > permissions.txt
+          if grep -Eq 'android.permission.(INTERNET|ACCESS_NETWORK_STATE)' permissions.txt; then
+            cat permissions.txt
+            exit 1
+          fi
           sha256sum *.apk > SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
