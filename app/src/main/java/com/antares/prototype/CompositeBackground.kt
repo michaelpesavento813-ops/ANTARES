@@ -18,6 +18,8 @@ import org.json.JSONObject
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
+internal const val COMPOSITE_SOURCE_EDGE = 2048
+
 internal enum class BackgroundMode(val label: String) {
     GREEN("Green Screen"), TRANSPARENT("Transparent Background"), ORIGINAL("Original Background"),
     SOLID("Solid Color"), CUSTOM("Custom Background Image")
@@ -252,6 +254,9 @@ internal class CompositeRenderer(private val context: Context, private val proje
 
     fun render(references: List<SubjectReference>, design: CompositeDesign, preview: Boolean = false): Bitmap {
         require(references.size == design.layers.size)
+        val requiredSources = references.map { it.photoId }.toSet() + listOfNotNull(design.backgroundPhoto)
+        val expired = sources.keys.filter { it !in requiredSources }
+        expired.forEach { sources.remove(it)?.recycle() }
         val downscale = if (preview) 440f / maxOf(design.width, design.height) else 1f
         val width = (design.width * downscale).roundToInt()
         val height = (design.height * downscale).roundToInt()

@@ -241,7 +241,7 @@ private class Processor(private val context: Context, private val db: ProjectSto
         val design = request.composite
         val result = if (design != null) {
             require(design.reviewed) { "Inspect and confirm the subject cutout before rendering" }
-            CompositeRenderer(context, task.projectId, 2048).use { renderer ->
+            CompositeRenderer(context, task.projectId, COMPOSITE_SOURCE_EDGE).use { renderer ->
                 request.references.forEachIndexed { index, reference ->
                     val cutout = renderer.cutout(reference, design.layers[index])
                     try {

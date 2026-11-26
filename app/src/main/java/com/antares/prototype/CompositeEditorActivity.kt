@@ -51,7 +51,7 @@ class CompositeEditorActivity : Activity() {
         request = WorkflowRequest.decode(state?.getString("request") ?: intent.getStringExtra("request") ?: run { finish(); return })
         design = requireNotNull(request.composite)
         backgroundTask = state?.getLong("backgroundTask") ?: 0L
-        renderer = CompositeRenderer(applicationContext, project, 640)
+        renderer = CompositeRenderer(applicationContext, project, COMPOSITE_SOURCE_EDGE)
         val frame = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         frame.setOnApplyWindowInsetsListener { view, insets ->
             @Suppress("DEPRECATION")

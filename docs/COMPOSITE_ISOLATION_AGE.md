@@ -21,3 +21,5 @@ The renderer adjusts local skin-like texture and tone from original pixels, with
 ## Mask output regression
 
 The checksum-pinned model returns a single foreground confidence map in the desktop reference runtime. The Android adapter accepts that single-channel contract and a two-channel result that lists foreground last. The real-model instrumentation requires both transparent and opaque pixels on the pinned fixture.
+
+The preview and queued final render use the same original-image decode limit and mask parameters. The preview scales the completed composition for display after applying the mask, which keeps the reviewed segmentation inputs consistent with export.
