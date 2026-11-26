@@ -149,6 +149,7 @@ class MainActivity : Activity() {
             projectId = 0
             photoId = 0
             projectLabel.text = "Active SUBJECT ▾"
+            projectLabel.contentDescription = "Active SUBJECT, none selected"
             photoLabel.text = "Select or create a subject."
             filesMenu.isEnabled = false
             showPreview(null)
@@ -170,7 +171,7 @@ class MainActivity : Activity() {
         val key = listOf(project, latest, photoId, queued, archiveBusy)
         if (lastUi == key) return
         lastUi = key
-        projectLabel.text = "${project.name}  ▾"
+        projectLabel.text = "SUBJECT · ${project.name}  ▾"
         projectLabel.contentDescription = "Active SUBJECT ${project.name}"
         photoLabel.text = chosen?.let { "${it.label} · ${it.imageAlias}" } ?: "Add reference photos."
         filesMenu.isEnabled = true

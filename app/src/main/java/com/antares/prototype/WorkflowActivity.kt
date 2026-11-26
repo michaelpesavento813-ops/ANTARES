@@ -62,13 +62,21 @@ class WorkflowActivity : Activity() {
             val padding = (16 * resources.displayMetrics.density).toInt()
             setPadding(padding, padding, padding, padding)
         }
-        scroll.setOnApplyWindowInsetsListener { view, insets ->
+        val screen = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        screen.setOnApplyWindowInsetsListener { view, insets ->
             @Suppress("DEPRECATION")
             view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
             insets
         }
+        val subjectTitle = TextView(this).apply {
+            textSize = 16f
+            val padding = (16 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding, padding, 0)
+        }
+        screen.addView(subjectTitle)
         scroll.addView(root)
-        setContentView(scroll)
+        screen.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        setContentView(screen)
         label(workflow.title, 25f)
         val activeSubject = store.projects().firstOrNull { it.id == projectId }
         if (activeSubject == null) {
@@ -76,7 +84,7 @@ class WorkflowActivity : Activity() {
             button("Return to subjects") { finish() }
             return
         }
-        label("SUBJECT · ${activeSubject.name}", 16f)
+        subjectTitle.text = "SUBJECT · ${activeSubject.name}"
         progress = label("Choose the subject before starting.", 16f)
         button("Choose photograph") { pickPhoto() }
         preview = SubjectView(this) { updateStatus() }

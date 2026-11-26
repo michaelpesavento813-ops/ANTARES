@@ -390,7 +390,7 @@ private fun comparePrefix(target: InputStream, expected: InputStream): Long {
     }
 }
 
-private fun atomic(file: File, write: (OutputStream) -> Unit) {
+internal fun atomic(file: File, write: (OutputStream) -> Unit) {
     val atomic = AtomicFile(file)
     val stream = atomic.startWrite()
     try {

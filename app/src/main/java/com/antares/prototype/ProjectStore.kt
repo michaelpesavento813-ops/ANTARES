@@ -9,6 +9,8 @@ import java.util.Locale
 internal class ProjectStore(context: Context) :
     SQLiteOpenHelper(context, "antares.db", null, 1) {
 
+    init { setWriteAheadLoggingEnabled(true) }
+
     data class Project(val id: Long, val name: String)
     data class Task(
         val id: Long, val projectId: Long, val kind: String, val input: String,
@@ -69,7 +71,7 @@ internal class ProjectStore(context: Context) :
 
     fun deleteProject(project: Long): List<Long> {
         val database = writableDatabase
-        database.beginTransaction()
+        database.beginTransactionNonExclusive()
         try {
             val rows = snapshot(project)
             val arguments = arrayOf(project.toString())
@@ -113,7 +115,7 @@ internal class ProjectStore(context: Context) :
 
     fun queueBatch(project: Long): Long {
         val db = writableDatabase
-        db.beginTransaction()
+        db.beginTransactionNonExclusive()
         try {
             val photos = photos(project)
             require(photos.isNotEmpty()) { "Add photos before starting a project scan" }

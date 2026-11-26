@@ -115,7 +115,7 @@ internal class SubjectArchive(private val context: Context) {
         val createdOutputs = mutableListOf<File>()
         ProjectStore(context).use { store ->
             val database = store.writableDatabase
-            database.beginTransaction()
+            database.beginTransactionNonExclusive()
             try {
                 val names = store.projects().map { it.name }.toSet()
                 val candidateName = if (subject !in names) subject else generateSequence(1) { it + 1 }
@@ -144,7 +144,10 @@ internal class SubjectArchive(private val context: Context) {
                             else {
                                 val temporary = File(original.parentFile, ".${UUID.randomUUID()}.restore")
                                 try {
-                                    backup.copyTo(temporary)
+                                    temporary.outputStream().use { output ->
+                                        backup.inputStream().use { it.copyTo(output) }
+                                        output.fd.sync()
+                                    }
                                     if (!original.exists()) check(temporary.renameTo(original))
                                 } finally { temporary.delete() }
                             }
@@ -155,7 +158,7 @@ internal class SubjectArchive(private val context: Context) {
                             check(backup.isFile) { "A result is missing from the backup" }
                             val target = outputFile(context, newId, ext)
                             createdOutputs += target
-                            if (ext == "png") backup.copyTo(target, overwrite = true)
+                            if (ext == "png") atomic(target) { stream -> backup.inputStream().use { it.copyTo(stream) } }
                             else {
                                 val document = JSONObject(backup.readText()).put("projectId", id).put("batchId", newId)
                                 val results = document.getJSONArray("results")
@@ -172,7 +175,7 @@ internal class SubjectArchive(private val context: Context) {
                                         }
                                     }
                                 }
-                                target.writeText(document.toString())
+                                atomic(target) { it.write(document.toString().toByteArray(Charsets.UTF_8)) }
                             }
                         }
                     }
