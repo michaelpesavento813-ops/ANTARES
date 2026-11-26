@@ -6,11 +6,11 @@ Temporarily handoff junction for AI
 ANTARES runs directly on Android. The package targets Android 15 and includes the offline Face Landmarker model.
 
 1. Open ANTARES and tap **Add photos**. Select photographs in Android Files.
-2. Tap **Deep Scan** for the selected photo or **Deep Scan entire project** for the project.
-3. After the result is ready, tap **Save As JSON** or **Save As CSV**. Pick the destination and edit the filename in Android Files. Each format has its own picker, so the two files may use different folders. The suggested name identifies the same scan in both formats.
+2. Choose one of the four permanent buttons. In **Deep Scan/Mapping**, select the intended outline or draw a region, then confirm it. Use **Combine confirmed scans for export** to group the completed scans you select.
+3. After a result is ready, tap **Save As JSON**, **Save As CSV**, or **Save As PNG** as appropriate. Select the exact result if more than one is available. Pick the destination and edit the filename in Android Files. JSON and CSV can use different folders and share the same result identifier.
 4. Set **Preferred export folder** to make Android Files open there on future saves when supported. Tap **Open saved file** to open a saved result in a compatible Android app.
 
-Source documents are imported through read-only grants and copied byte-for-byte into the app's private storage. The analysis output contains normalized facial landmarks. Grayscale is a separate preview operation. The next-build tattoo and forensic requirements are tracked in [NEXT_BUILD_PRIORITIES.md](NEXT_BUILD_PRIORITIES.md).
+Source documents are imported through read-only grants and copied byte-for-byte into the app's private storage. The analysis output contains estimated normalized facial landmarks and the confirmed source region. The separate repair and appearance workflows produce region-limited derivatives. Composites use independently confirmed source regions. See the [subject-selection addendum](docs/SUBJECT_SELECTION.md) for workflow behavior and limits and [NEXT_BUILD_PRIORITIES.md](NEXT_BUILD_PRIORITIES.md) for tattoo and forensic requirements.
 
 ### Build and verify
 
