@@ -11,7 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      statuses: write
     steps:
+      - name: Announce acceptance run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state=pending -f context=antares/android-15 \
+            -f description="Android 15 acceptance is running" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -77,3 +86,25 @@ jobs:
           profile: pixel_7
           disable-animations: true
           script: bash ci/test-apk.sh
+
+  record-acceptance:
+    if: always()
+    needs: [build, android-15]
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish exact APK acceptance status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          EMULATOR_RESULT: ${{ needs.android-15.result }}
+        run: |
+          state=failure
+          if [ "$BUILD_RESULT" = success ] && [ "$EMULATOR_RESULT" = success ]; then
+            state=success
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -f state="$state" -f context=antares/android-15 \
+            -f description="Build $BUILD_RESULT, Android 15 $EMULATOR_RESULT" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
