@@ -18,3 +18,10 @@
 | A-003 | Release blocker | Open Deep Scan in the prototype. No runtime model integration | Port the checksum-matched model and verify outputs |
 | A-004 | Release blocker | Feed mirrored, obscured, and contradictory tattoo references. Legacy code provides review hints only | Implement and validate locked chirality and forensic gates before release |
 | A-005 | Release blocker | Save JSON and CSV to different locations. Prototype only exports PNG | Separate native Save As entries, durable export records, readback verification |
+
+## First Android 15 acceptance run
+
+- GitHub Actions run 45738941968 built the candidate, passed the two JVM tests and lint, and verified the APK signature and checksums. The Android 15 emulator installed, launched, force-stopped, and relaunched the same APK successfully.
+- Acceptance then stopped on first JSON destination read. The test created a MediaStore entry without materializing an empty backing file. The corrected fixture now opens and closes every destination's output stream at creation time. The export routine still rejects occupied destinations and verifies every completed result by reading it back.
+- The follow-up test compares all 478 Android landmarks against the pinned desktop CPU fixture and uses raw instrumentation output so CI can check the result code.
+- Historical landmark JSON has 68 rows: 62 detections with 478 points and 6 no-face outcomes. It contains no original SHA-256 hashes, and none of its filename-and-size pairs match the repository's original photographs. This prevents a direct comparison against that historical export with the presently paired files.

@@ -10,7 +10,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.MediaStore
+import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 
@@ -43,7 +45,9 @@ class AcceptanceRunner : Instrumentation() {
                 }
                 return requireNotNull(resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)).also {
                     owned.add(it)
-                    if (content != null) resolver.openOutputStream(it, "wt")!!.use { stream -> stream.write(content) }
+                    resolver.openOutputStream(it, "wt")!!.use { stream ->
+                        if (content != null) stream.write(content)
+                    }
                 }
             }
 
@@ -121,8 +125,20 @@ class AcceptanceRunner : Instrumentation() {
             check(projectJson.getLong("batchId") == batch && rows.length() == 3)
             val face = rows.getJSONObject(2)
             check(face.getString("status") == "detected" && face.getInt("landmarkCount") == 478)
-            val firstLandmark = face.getJSONArray("landmarks").getJSONObject(0)
-            check(firstLandmark.getDouble("x") in 0.2..0.7 && firstLandmark.getDouble("y") in 0.10..0.45)
+            val measured = face.getJSONArray("landmarks")
+            val expected = context.assets.open("astronaut-cpu-reference.json").use {
+                JSONArray(it.bufferedReader().readText())
+            }
+            check(expected.length() == measured.length())
+            var maxDelta = 0.0
+            for (index in 0 until expected.length()) {
+                for (axis in listOf("x", "y", "z")) {
+                    maxDelta = maxOf(maxDelta, abs(
+                        measured.getJSONObject(index).getDouble(axis) - expected.getJSONObject(index).getDouble(axis)
+                    ))
+                }
+            }
+            check(maxDelta <= 0.005) { "Reference landmark drift $maxDelta exceeds 0.005" }
             val csvRows = read(batchCsvTarget).decodeToString().lineSequence().filter { it.isNotBlank() }.toList()
             check(csvRows.size == 481 && csvRows.drop(1).all { it.startsWith("\"$batch\",") })
             check(read(portrait).contentEquals(portraitBytes))
@@ -137,7 +153,7 @@ class AcceptanceRunner : Instrumentation() {
                 check(reopened.result(project, "scan", imported)?.id != null)
                 check(reopened.latestBatch(project)?.id == batch)
             }
-            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection and reopened queue. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
+            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection and reopened queue. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
             finish(Activity.RESULT_OK, report)
         } catch (error: Throwable) {
             report.putString("stream", "\nFAIL: ${error.stackTraceToString()}\n")
