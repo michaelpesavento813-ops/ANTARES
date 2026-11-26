@@ -77,16 +77,17 @@ internal class ProjectStore(context: Context) :
         } finally { db.endTransaction() }
     }
 
-    fun queueConfirmedBatch(project: Long): Long {
-        val scans = tasks(
-            """WHERE project_id=? AND kind='scan' AND status='done' AND input!=''
-                AND id IN (
-                    SELECT MAX(id) FROM task WHERE project_id=? AND kind='scan'
-                    AND status='done' AND input!='' GROUP BY parent
-                ) ORDER BY id""".trimIndent(), arrayOf(project.toString(), project.toString())
-        )
-        require(scans.isNotEmpty()) { "Confirm subjects and complete at least one Deep Scan first" }
-        return queue(project, "batch", scans.joinToString(",") { it.id.toString() }, "Confirmed project scans")
+    fun confirmedScans(project: Long) = tasks(
+        "WHERE project_id=? AND kind='scan' AND status='done' AND input!='' ORDER BY id DESC",
+        arrayOf(project.toString())
+    )
+
+    fun queueConfirmedBatch(project: Long, selected: List<Long>): Long {
+        val eligible = confirmedScans(project).map { it.id }.toSet()
+        require(selected.isNotEmpty() && selected.distinct().size == selected.size && selected.all { it in eligible }) {
+            "Choose at least one completed, confirmed scan"
+        }
+        return queue(project, "batch", selected.joinToString(","), "Confirmed project scans")
     }
 
     private fun tasks(where: String, arguments: Array<String>): List<Task> = readableDatabase.rawQuery(
@@ -110,14 +111,16 @@ internal class ProjectStore(context: Context) :
     fun task(id: Long) = tasks("WHERE id=?", arrayOf(id.toString())).singleOrNull()
     fun recent(project: Long) = tasks("WHERE project_id=? ORDER BY id DESC LIMIT 30", arrayOf(project.toString()))
     fun photos(project: Long) = tasks("WHERE project_id=? AND kind='import' AND status='done' ORDER BY id", arrayOf(project.toString()))
-    fun latestBatch(project: Long) = tasks(
-        "WHERE project_id=? AND kind='batch' AND status='done' ORDER BY id DESC LIMIT 1",
+    fun projectBatches(project: Long) = tasks(
+        "WHERE project_id=? AND kind='batch' AND status='done' ORDER BY id DESC",
         arrayOf(project.toString())
-    ).firstOrNull()
-    fun result(project: Long, kind: String, parent: Long) = tasks(
-        "WHERE project_id=? AND kind=? AND parent=? AND status='done' ORDER BY id DESC LIMIT 1",
+    )
+    fun latestBatch(project: Long) = projectBatches(project).firstOrNull()
+    fun completedResults(project: Long, kind: String, parent: Long) = tasks(
+        "WHERE project_id=? AND kind=? AND parent=? AND status='done' ORDER BY id DESC",
         arrayOf(project.toString(), kind, parent.toString())
-    ).firstOrNull()
+    )
+    fun result(project: Long, kind: String, parent: Long) = completedResults(project, kind, parent).firstOrNull()
     fun duplicate(project: Long, hash: String) = tasks(
         "WHERE project_id=? AND hash=? AND kind='import' AND status='done' ORDER BY id LIMIT 1",
         arrayOf(project.toString(), hash)

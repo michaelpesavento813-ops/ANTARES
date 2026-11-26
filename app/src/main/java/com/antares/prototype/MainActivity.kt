@@ -84,10 +84,7 @@ class MainActivity : Activity() {
         action(body, "Add photos") { pickPhotos() }
         photoLabel = text(body, "", 17f)
         action(body, "Choose imported photo") { choosePhoto() }
-        action(body, "Combine confirmed scans for export") {
-            db.queueConfirmedBatch(projectId)
-            kick()
-        }
+        action(body, "Combine confirmed scans for export") { chooseScansForBatch() }
         saveJson = action(body, "Save As JSON") { save(JSON) }
         saveCsv = action(body, "Save As CSV") { save(CSV) }
         savePng = action(body, "Save As PNG") { save(PNG) }
@@ -238,16 +235,40 @@ class MainActivity : Activity() {
         return db.result(projectId, kind, photoId)
     }
 
+    private fun chooseScansForBatch() {
+        val scans = db.confirmedScans(projectId)
+        if (scans.isEmpty()) {
+            message("Confirm subjects and complete Deep Scan first.")
+            return
+        }
+        val checked = BooleanArray(scans.size)
+        AlertDialog.Builder(this).setTitle("Choose scans to group for export")
+            .setMultiChoiceItems(scans.map { scan ->
+                val photo = scan.parent?.let(db::task)
+                "${photo?.label ?: "Photo"} · result ${scan.id}"
+            }.toTypedArray(), checked) { _, index, enabled -> checked[index] = enabled }
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Group scans") { _, _ ->
+                guarded {
+                    db.queueConfirmedBatch(projectId, scans.filterIndexed { index, _ -> checked[index] }.map { it.id })
+                    kick()
+                }
+            }.show()
+    }
+
     private fun save(format: Int) {
-        val single = result(if (format == PNG) "png" else "scan")
-        val batch = if (format == PNG) null else db.latestBatch(projectId)
-        if (single == null && batch == null) return
-        if (single != null && batch != null) {
-            AlertDialog.Builder(this).setTitle("Choose analysis to export")
-                .setItems(arrayOf("Selected photo · result ${single.id}", "Entire project · result ${batch.id}")) { _, index ->
-                    guarded { openSavePicker(format, if (index == 0) single else batch) }
-                }.show()
-        } else openSavePicker(format, single ?: requireNotNull(batch))
+        val perPhoto = if (photoId == 0L) emptyList() else
+            db.completedResults(projectId, if (format == PNG) "png" else "scan", photoId)
+        val available = if (format == PNG) perPhoto else perPhoto + db.projectBatches(projectId)
+        if (available.isEmpty()) return
+        if (available.size == 1) {
+            openSavePicker(format, available.single())
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Choose result to export")
+            .setItems(available.map { "${it.label} · result ${it.id}" }.toTypedArray()) { _, index ->
+                guarded { openSavePicker(format, available[index]) }
+            }.show()
     }
 
     private fun openSavePicker(format: Int, job: ProjectStore.Task) {

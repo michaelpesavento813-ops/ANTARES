@@ -182,6 +182,11 @@ class AcceptanceRunner : Instrumentation() {
             check(selectionOutput.getInt("landmarkCount") == 478)
             check(selectionOutput.getJSONObject("selection").getJSONArray("references")
                 .getJSONObject(0).getLong("photoId") == selectedPortrait.photoId)
+            ProjectStore(targetContext).use { workspace ->
+                check(workspace.completedResults(project, "png", imported).map { it.id }.containsAll(listOf(repair, cosmetic, collage)))
+                check(workspace.confirmedScans(project).map { it.id }.contains(subjectScan))
+                check(workspace.confirmedScans(project).none { it.id == scan })
+            }
             check(read(source).contentEquals(bytes) && read(portrait).contentEquals(portraitBytes))
             ProjectStore(targetContext).use { reopened ->
                 check(reopened.task(imported)?.status == "done")
