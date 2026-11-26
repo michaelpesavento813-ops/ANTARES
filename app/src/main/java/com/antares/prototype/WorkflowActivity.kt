@@ -349,6 +349,7 @@ class WorkflowActivity : Activity() {
     private fun currentAge(): AgeDesign {
         val years = ageYears.text.toString().trim().toIntOrNull()
             ?: error("Enter a signed year adjustment between -40 and +40.")
+        require(years in -40..40) { "Enter a signed year adjustment between -40 and +40." }
         return AgeDesign(years, amount.progress, if (ageBody.isChecked) AgeScope.FACE_AND_VISIBLE_BODY else AgeScope.FACE)
     }
 

@@ -153,8 +153,8 @@ internal class CompositeRenderer(private val context: Context, private val proje
         }
         val output = result.confidenceMasks().orElseThrow { IllegalStateException("No confidence mask was returned") }
         try {
-            require(output.size == 2) { "Unexpected segmentation output" }
-            val foreground = output[1]
+            require(output.size in 1..2) { "Unexpected segmentation output" }
+            val foreground = output.last()
             val data = ByteBufferExtractor.extract(foreground).order(ByteOrder.nativeOrder()).asFloatBuffer()
             val count = foreground.width * foreground.height
             require(data.remaining() >= count)

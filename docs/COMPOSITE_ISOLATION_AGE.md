@@ -17,3 +17,7 @@ The point-based model and feathering are development tools. True optical matting
 This mode is within Make Me Pretty. Enter a signed year adjustment from −40 to +40 or use the slider. Strength is separate. Face-only automatically limits the filter to one visible face inside the chosen region. Face and visible body uses the user-confirmed region. The preview toggles between source and derivative. Zero adjustment or zero strength leaves the decoded source pixels unchanged.
 
 The renderer adjusts local skin-like texture and tone from original pixels, without moving facial features or generating a historical reconstruction. Year settings control the strength and direction of this simulation. Perceived age has not been calibrated against known age pairs. The derivative and exact settings stay attached to the active SUBJECT and are exportable through Save As PNG.
+
+## Mask output regression
+
+The checksum-pinned model returns a single foreground confidence map in the desktop reference runtime. The Android adapter accepts that single-channel contract and a two-channel result that lists foreground last. The real-model instrumentation requires both transparent and opaque pixels on the pinned fixture.
