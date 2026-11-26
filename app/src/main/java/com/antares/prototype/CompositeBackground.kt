@@ -150,7 +150,9 @@ internal class CompositeRenderer(private val context: Context, private val proje
                 .setOutputConfidenceMasks(true).setOutputCategoryMask(false).build()
         ).also { segmenter = it }
         val point = NormalizedKeypoint.create(style.seed.x, style.seed.y)
-        val result = BitmapImageBuilder(image).build().use {
+        // MPImage takes ownership of its bitmap. The crop is still needed for compositing.
+        val inferenceInput = requireNotNull(image.copy(Bitmap.Config.ARGB_8888, false))
+        val result = BitmapImageBuilder(inferenceInput).build().use {
             detector.segment(it, InteractiveSegmenterLegacy.RegionOfInterest.create(point))
         }
         val output = result.confidenceMasks().orElseThrow { IllegalStateException("No confidence mask was returned") }

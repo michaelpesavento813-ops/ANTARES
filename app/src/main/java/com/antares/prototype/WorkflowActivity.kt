@@ -455,7 +455,8 @@ internal fun detectPeople(context: Context, bitmap: Bitmap): List<Region> {
         .setBaseOptions(BaseOptions.builder().setModelAssetPath("efficientdet_lite0.tflite").build())
         .setCategoryAllowlist(listOf("person")).setMaxResults(24).setScoreThreshold(0.37f).build()
     return ObjectDetector.createFromOptions(context, options).use { detector ->
-        BitmapImageBuilder(bitmap).build().use { image ->
+        val inferenceInput = requireNotNull(bitmap.copy(Bitmap.Config.ARGB_8888, false))
+        BitmapImageBuilder(inferenceInput).build().use { image ->
             detector.detect(image).detections().mapNotNull {
                 val box = it.boundingBox()
                 runCatching {
