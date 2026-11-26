@@ -193,7 +193,12 @@ class AcceptanceRunner : Instrumentation() {
                 check(reopened.result(project, "scan", imported)?.id != null)
                 check(reopened.latestBatch(project)?.id == batch)
             }
-            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection and reopened queue. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
+            repeat(12) { attempt ->
+                SystemClock.sleep((attempt % 4) * 17L)
+                val duplicate = await(submit("import", source))
+                check(duplicate.hash == photo.hash && duplicate.detail.contains("Exact SHA-256 match"))
+            }
+            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection, reopened queue, and 12 idle handoffs. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
             finish(Activity.RESULT_OK, report)
         } catch (error: Throwable) {
             report.putString("stream", "\nFAIL: ${error.stackTraceToString()}\n")

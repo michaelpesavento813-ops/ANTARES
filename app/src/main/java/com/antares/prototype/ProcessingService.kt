@@ -78,7 +78,8 @@ class ProcessingService : JobService() {
 
         internal fun schedule(context: Context) {
             val scheduler = context.getSystemService(JobScheduler::class.java)
-            if (scheduler.getPendingJob(JOB_ID) != null) return
+            // A finishing job may still appear pending in the framework. Replace that
+            // schedule so its teardown cannot strand work queued at the idle boundary.
             check(scheduler.schedule(JobInfo.Builder(JOB_ID, ComponentName(context, ProcessingService::class.java))
                 .setPersisted(true)
                 .setOverrideDeadline(0)
