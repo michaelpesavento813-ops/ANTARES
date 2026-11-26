@@ -160,6 +160,11 @@ internal class ProjectStore(context: Context) :
     fun task(id: Long) = tasks("WHERE id=?", arrayOf(id.toString())).singleOrNull()
     fun recent(project: Long) = tasks("WHERE project_id=? ORDER BY id DESC LIMIT 30", arrayOf(project.toString()))
     fun photos(project: Long) = tasks("WHERE project_id=? AND kind='import' AND status='done' ORDER BY id", arrayOf(project.toString()))
+    fun composites(project: Long) = tasks(
+        "WHERE project_id=? AND kind='png' AND status='done' AND input!='' ORDER BY id DESC",
+        arrayOf(project.toString())
+    ).filter { runCatching { WorkflowRequest.decode(it.input).composite != null }.getOrDefault(false) }
+
     fun projectBatches(project: Long) = tasks(
         "WHERE project_id=? AND kind='batch' AND status='done' ORDER BY id DESC",
         arrayOf(project.toString())

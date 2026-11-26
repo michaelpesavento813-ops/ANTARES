@@ -297,9 +297,10 @@ class MainActivity : Activity() {
                         subjectArchiveLock.withLock {
                             val removed = ProjectStore(applicationContext).use { it.deleteProject(project.id) }
                             removed.forEach { id ->
-                                listOf("json", "csv", "png", "export").forEach { outputFile(this, id, it).delete() }
+                                (listOf("json", "csv", "png", "export") + (0..3).map { "mask-$it.png" })
+                                    .forEach { outputFile(this, id, it).delete() }
                             }
-                            settings.edit().remove("exportFolder:${project.id}").apply()
+                            settings.edit().remove("exportFolder:${project.id}").remove("background:${project.id}").apply()
                         }
                     }) {
                         if (projectId == project.id) selectProject(0)
@@ -350,7 +351,8 @@ class MainActivity : Activity() {
         val menu = PopupMenu(this, filesMenu)
         val options = listOf(
             "Add photos", "Choose imported photo", "Save As JSON", "Save As CSV", "Save As PNG",
-            "Group confirmed scans for export", "Open saved file", "Preferred export folder", "Retry failed job", "System health"
+            "Group confirmed scans for export", "Open saved file", "Preferred export folder", "Retry failed job", "System health",
+            "Reopen composite or isolation"
         )
         val scanReady = result("scan") != null || db.latestBatch(projectId) != null
         options.forEachIndexed { index, label ->
@@ -374,6 +376,7 @@ class MainActivity : Activity() {
                     7 -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), FOLDER)
                     8 -> retryJob()
                     9 -> showHealth()
+                    10 -> chooseSavedComposite(this, db, projectId, WORKFLOW)
                 }
             }
             true

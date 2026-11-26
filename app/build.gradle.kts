@@ -12,8 +12,8 @@ android {
         testInstrumentationRunner = "com.antares.prototype.AcceptanceRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.5.0-dev"
+        versionCode = 6
+        versionName = "0.6.0-dev"
     }
     val keystore = providers.environmentVariable("ANTARES_SIGNING_KEYSTORE").orNull
     if (keystore != null) {
@@ -45,3 +45,8 @@ val verifyTestImage by tasks.registering(Exec::class) {
     commandLine("bash", rootProject.file("ci/fetch-test-image.sh").absolutePath)
 }
 tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach { dependsOn(verifyTestImage) }
+
+val verifySegmenter by tasks.registering(Exec::class) {
+    commandLine("bash", rootProject.file("ci/fetch-segmenter.sh").absolutePath)
+}
+tasks.named("preBuild") { dependsOn(verifySegmenter) }

@@ -202,6 +202,64 @@ class AcceptanceRunner : Instrumentation() {
                 val duplicate = await(submit("import", source))
                 check(duplicate.hash == photo.hash && duplicate.detail.contains("Exact SHA-256 match"))
             }
+            val manualStroke = MaskBrush(true, 0.16f,
+                listOf(CompositePoint(0.5f, 0.35f), CompositePoint(0.5f, 0.65f)))
+            val manualLayer = ForegroundStyle(0.5f, 0.5f, manualOnly = true, brushes = listOf(manualStroke))
+            val proof = CompositeDesign(layers = listOf(manualLayer), width = 512, height = 512, reviewed = true)
+            val automaticLayer = ForegroundStyle(0.5f, 0.5f)
+            CompositeRenderer(targetContext, project, 640).use { engine ->
+                val automatic = engine.cutout(selectedPortrait, automaticLayer)
+                try {
+                    val all = IntArray(automatic.width * automatic.height)
+                    automatic.getPixels(all, 0, automatic.width, 0, 0, automatic.width, automatic.height)
+                    check(all.any { Color.alpha(it) == 0 } && all.any { Color.alpha(it) >= 240 })
+                } finally { automatic.recycle() }
+                for (mode in BackgroundMode.entries) {
+                    val chosen = proof.copy(mode = mode, solid = Color.rgb(112, 75, 25),
+                        backgroundPhoto = if (mode == BackgroundMode.CUSTOM) portraitImport else null)
+                    val background = engine.render(listOf(selectedPhoto), chosen)
+                    try {
+                        check(background.width == 512 && background.height == 512)
+                        val corner = background.getPixel(0, 0)
+                        when (mode) {
+                            BackgroundMode.GREEN -> check(corner == Color.GREEN)
+                            BackgroundMode.TRANSPARENT -> check(Color.alpha(corner) == 0)
+                            BackgroundMode.SOLID -> check(corner == Color.rgb(112, 75, 25))
+                            BackgroundMode.ORIGINAL -> check(corner == Color.rgb(30, 75, 105))
+                            BackgroundMode.CUSTOM -> check(Color.alpha(corner) == 255)
+                        }
+                    } finally { background.recycle() }
+                }
+                val eraser = MaskBrush(false, 0.12f, listOf(CompositePoint(0.5f, 0.5f)))
+                val corrected = engine.cutout(selectedPhoto, manualLayer.copy(brushes = listOf(manualStroke, eraser)))
+                try { check(Color.alpha(corrected.getPixel(corrected.width / 2, corrected.height / 2)) == 0) }
+                finally { corrected.recycle() }
+            }
+            val isolatedTask = workflow(WorkflowRequest(Workflow.COMPOSITE, listOf(selectedPhoto), 0, 50,
+                composite = proof.copy(mode = BackgroundMode.TRANSPARENT)))
+            await(isolatedTask)
+            val alphaFile = outputFile(targetContext, isolatedTask, "mask-0.png")
+            check(alphaFile.isFile && alphaFile.length() > 0)
+            val ageTasks = (-40..40 step 40).map { years ->
+                workflow(WorkflowRequest(Workflow.COSMETIC, listOf(selectedPortrait), 0, 100,
+                    age = AgeDesign(years, 100, AgeScope.FACE_AND_VISIBLE_BODY))).also { await(it) }
+            }
+            val faceOnlyAge = workflow(WorkflowRequest(Workflow.COSMETIC, listOf(selectedPortrait), 0, 100,
+                age = AgeDesign(-15, 70, AgeScope.FACE))).also { await(it) }
+            val sourceBitmap = BitmapFactory.decodeByteArray(portraitBytes, 0, portraitBytes.size)
+            try {
+                val zero = BitmapFactory.decodeFile(outputFile(targetContext, ageTasks[1], "png").path)
+                try { check(sourceBitmap.sameAs(zero)) } finally { zero.recycle() }
+                for (ageTask in listOf(ageTasks.first(), ageTasks.last(), faceOnlyAge)) {
+                    val aged = BitmapFactory.decodeFile(outputFile(targetContext, ageTask, "png").path)
+                    try {
+                        check(aged.width == sourceBitmap.width && aged.height == sourceBitmap.height)
+                        check(!aged.sameAs(sourceBitmap))
+                        check(aged.getPixel(5, 5) == sourceBitmap.getPixel(5, 5))
+                    } finally { aged.recycle() }
+                }
+            } finally { sourceBitmap.recycle() }
+            check(runCatching { AgeDesign(41, 50, AgeScope.FACE) }.isFailure)
             val backupTarget = doc("ant_subject.zip", "application/zip")
             val brokenTarget = doc("ant_truncated_subject.zip", "application/zip")
             val independent = ProjectStore(targetContext).use { it.addProject("Separate subject ${System.nanoTime()}") }
@@ -233,6 +291,16 @@ class AcceptanceRunner : Instrumentation() {
                 val restoredPhoto = rawScan.getJSONArray("results").getJSONObject(0).getLong("imageId")
                 check(rawScan.getLong("projectId") == restored)
                 check(subjects.task(restoredPhoto)?.projectId == restored)
+                val reopenedIsolation = subjects.composites(restored).single()
+                check(outputFile(targetContext, reopenedIsolation.id, "mask-0.png").isFile)
+                val reopenedDesign = requireNotNull(WorkflowRequest.decode(reopenedIsolation.input).composite)
+                val reopenedRef = WorkflowRequest.decode(reopenedIsolation.input).references.single()
+                val reusedDesign = reopenedDesign.copy(mode = BackgroundMode.GREEN,
+                    layers = listOf(reopenedDesign.layers.single().copy(reusedMask = reopenedIsolation.id, brushes = emptyList())))
+                CompositeRenderer(targetContext, restored, 640).use { editor ->
+                    val recolored = editor.render(listOf(reopenedRef), reusedDesign)
+                    try { check(recolored.getPixel(0, 0) == Color.GREEN) } finally { recolored.recycle() }
+                }
                 val pending = subjects.queue(independent, "import", "", "Pending database safety check")
                 check(runCatching { subjects.deleteProject(independent) }.isFailure)
                 check(subjects.task(pending)?.projectId == independent)
@@ -242,7 +310,7 @@ class AcceptanceRunner : Instrumentation() {
                 check(subjects.photos(restored).isNotEmpty() && subjects.projects().any { it.id == independent })
             }
             check(read(source).contentEquals(bytes) && read(portrait).contentEquals(portraitBytes))
-            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection, reopened queue, and 12 idle handoffs. Subject creation, rename, isolation, verified backup, truncated restore rollback, remapped restore and pending-delete rejection passed. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
+            report.putString("stream", "\nPASS: Android 15 import, malformed isolation, exact match, no-face and 478-point inference, batch JSON/CSV/PNG readback, partial export recovery, occupied destination rejection, reopened queue, and 12 idle handoffs. Five backgrounds, native cutout, mask brushes, mask reuse, and signed age controls passed. Subject creation, rename, isolation, verified backup, truncated restore rollback, remapped restore and pending-delete rejection passed. Four workflow routes, cancellation, region-limited edits, two-face and 16-face isolation checks, and two-reference composite passed. Max normalized coordinate drift $maxDelta. Duration ${SystemClock.elapsedRealtime() - checkStarted} ms.\n")
             finish(Activity.RESULT_OK, report)
         } catch (error: Throwable) {
             report.putString("stream", "\nFAIL: ${error.stackTraceToString()}\n")

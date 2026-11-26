@@ -8,3 +8,5 @@ local.properties
 /app/src/androidTest/assets/astronaut.png*
 
 .kotlin/
+/app/src/main/assets/magic_touch.tflite*
+/app/src/main/assets/efficientdet_lite0.tflite*

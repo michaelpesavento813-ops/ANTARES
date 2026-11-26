@@ -15,6 +15,13 @@ import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.EditText
+import android.widget.ImageView
+import android.widget.CheckBox
+import android.text.InputType
+import android.text.TextWatcher
+import android.text.Editable
+import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
@@ -36,6 +43,8 @@ class WorkflowActivity : Activity() {
     private lateinit var confirm: Button
     private lateinit var choices: RadioGroup
     private lateinit var amount: SeekBar
+    private lateinit var ageYears: EditText
+    private lateinit var ageBody: CheckBox
     private var projectId = 0L
     private var photoId = 0L
     private var session = 0
@@ -104,7 +113,7 @@ class WorkflowActivity : Activity() {
         root.addView(choices)
         val options = when (workflow) {
             Workflow.REPAIR -> listOf("Restore faded tones", "Reduce noise", "Soften fine scratches in the selected area")
-            Workflow.COSMETIC -> listOf("Hair tint", "Makeup tint", "Complexion softening")
+            Workflow.COSMETIC -> listOf("Hair tint", "Makeup tint", "Complexion softening", "Age Transformation")
             Workflow.COMPOSITE -> listOf("Side-by-side layout", "Stacked layout")
             Workflow.SCAN -> emptyList()
         }
@@ -121,10 +130,26 @@ class WorkflowActivity : Activity() {
             label("Adjustment strength", 15f)
             root.addView(amount)
         }
+        if (workflow == Workflow.COSMETIC) ageControls(state)
         confirm = button(if (workflow == Workflow.COMPOSITE) "Confirm and add reference" else "Confirm subject and start") {
             confirmSelection()
         }
+        if (workflow == Workflow.REPAIR || workflow == Workflow.COMPOSITE) {
+            button("Isolate Subject") {
+                val selected = preview.selection
+                if (processing || selected == null || !isolatedRegion(selected, preview.candidates)) {
+                    alert("Select one subject", "Choose or draw a region containing the intended subject before isolating.")
+                } else {
+                    val reference = SubjectReference(photoId, selected)
+                    AlertDialog.Builder(this).setTitle("Confirm subject for isolation")
+                        .setMessage("Inspect the region and confirm it contains the intended subject.")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Isolate Subject") { _, _ -> openComposite(listOf(reference), true) }.show()
+                }
+            }
+        }
         if (workflow == Workflow.COMPOSITE) {
+            button("Use saved isolation or composite") { chooseSavedComposite(this, store, projectId, 21) }
             button("Review confirmed references") { reviewReferences() }
             button("Create composite") { finishComposite() }
         }
@@ -140,6 +165,10 @@ class WorkflowActivity : Activity() {
         state.putString("references", JSONArray(references.map { it.json() }).toString())
         state.putInt("mode", choices.checkedRadioButtonId)
         state.putInt("amount", amount.progress)
+        if (::ageYears.isInitialized) {
+            state.putString("ageYears", ageYears.text.toString())
+            state.putBoolean("ageBody", ageBody.isChecked)
+        }
         super.onSaveInstanceState(state)
     }
 
@@ -177,7 +206,15 @@ class WorkflowActivity : Activity() {
             var failure: String? = null
             try {
                 bitmap = upright(originalFile(this, requireNotNull(photo.hash)), 1024)
-                outlines = try { detectSubjects(this, bitmap) } catch (_: Exception) {
+                outlines = try {
+                    val faces = detectSubjects(this, bitmap)
+                    if (workflow == Workflow.COMPOSITE || workflow == Workflow.REPAIR) {
+                        val bodies = detectPeople(this, bitmap)
+                        bodies + faces.filter { face ->
+                            bodies.none { body -> body.contains((face.left + face.right) / 2f, (face.top + face.bottom) / 2f) }
+                        }
+                    } else faces
+                } catch (_: Exception) {
                     failure = "Automatic outlines unavailable. Draw a region."
                     emptyList()
                 } catch (_: LinkageError) {
@@ -261,8 +298,8 @@ class WorkflowActivity : Activity() {
     }
 
     private fun finishComposite() {
-        if (references.size < 2) {
-            alert("Choose at least two references", "Confirm the intended subject separately in each photograph.")
+        if (references.isEmpty()) {
+            alert("Choose a reference", "Confirm the intended subject separately in each photograph.")
             return
         }
         AlertDialog.Builder(this).setTitle("Confirm composite references")
@@ -270,17 +307,126 @@ class WorkflowActivity : Activity() {
                 store.task(it.photoId)?.label ?: "Photo ${it.photoId}"
             })
             .setNegativeButton("Keep editing", null)
-            .setPositiveButton("Build composite") { _, _ -> submit(references.toList()) }.show()
+            .setPositiveButton("Open composite editor") { _, _ -> openComposite(references.toList(), false) }.show()
     }
 
     private fun submit(refs: List<SubjectReference>) {
         try {
-            val request = WorkflowRequest(workflow, refs, (choices.checkedRadioButtonId - 1).coerceAtLeast(0), amount.progress).encode()
-            store.queue(projectId, if (workflow == Workflow.SCAN) "scan" else "png", request, workflow.title, refs.first().photoId)
+            val age = if (workflow == Workflow.COSMETIC && choices.checkedRadioButtonId == 4) currentAge() else null
+            val request = WorkflowRequest(workflow, refs, (choices.checkedRadioButtonId - 1).coerceIn(0, 2),
+                amount.progress, age = age).encode()
+            store.queue(projectId, if (workflow == Workflow.SCAN) "scan" else "png", request, if (age == null) workflow.title else "Simulated Age Transformation", refs.first().photoId)
             ProcessingService.schedule(this)
             setResult(RESULT_OK, Intent().putExtra("photo", refs.first().photoId))
             finish()
         } catch (error: Exception) { alert("Unable to queue job", error.message.orEmpty()) }
+    }
+
+    private fun openComposite(refs: List<SubjectReference>, isolation: Boolean) {
+        val settings = (choices.checkedRadioButtonId - 1).coerceIn(0, 1)
+        val stored = getSharedPreferences("workspace", MODE_PRIVATE).getString("background:$projectId", null)
+        val background = stored?.let { runCatching { BackgroundMode.valueOf(it) }.getOrNull() } ?: BackgroundMode.GREEN
+        val layers = refs.indices.map { index ->
+            val position = (index + 0.5f) / refs.size
+            ForegroundStyle(if (settings == 0) position else 0.5f,
+                if (settings == 1) position else 0.5f, scale = if (refs.size == 1) 0.85f else 0.72f / refs.size)
+        }
+        val request = WorkflowRequest(Workflow.COMPOSITE, refs, settings, 50,
+            composite = CompositeDesign(mode = background, layers = layers))
+        startActivityForResult(Intent(this, CompositeEditorActivity::class.java).putExtra("project", projectId)
+            .putExtra("request", request.encode()).putExtra("isolate", isolation), 21)
+    }
+
+    @Deprecated("Composite editor result")
+    override fun onActivityResult(code: Int, result: Int, data: Intent?) {
+        super.onActivityResult(code, result, data)
+        if (code == 21 && result == RESULT_OK) {
+            setResult(RESULT_OK, data)
+            finish()
+        }
+    }
+
+    private fun currentAge(): AgeDesign {
+        val years = ageYears.text.toString().trim().toIntOrNull()
+            ?: error("Enter a signed year adjustment between -40 and +40.")
+        return AgeDesign(years, amount.progress, if (ageBody.isChecked) AgeScope.FACE_AND_VISIBLE_BODY else AgeScope.FACE)
+    }
+
+    private fun ageControls(state: Bundle?) {
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(panel)
+        panel.addView(TextView(this).apply {
+            text = "Simulated appearance · negative years for regression, positive years for progression."
+        })
+        ageYears = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            hint = "Years · −40 to +40"
+            setText(state?.getString("ageYears") ?: "0")
+        }
+        panel.addView(ageYears)
+        val bar = SeekBar(this).apply { max = 80; progress = ((ageYears.text.toString().toIntOrNull() ?: 0) + 40).coerceIn(0, 80) }
+        bar.contentDescription = "Simulated age adjustment in years"
+        panel.addView(bar)
+        bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(view: SeekBar, value: Int, fromUser: Boolean) {
+                if (fromUser) ageYears.setText((value - 40).toString())
+            }
+            override fun onStartTrackingTouch(bar: SeekBar) = Unit
+            override fun onStopTrackingTouch(bar: SeekBar) = Unit
+        })
+        ageYears.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                s?.toString()?.toIntOrNull()?.takeIf { it in -40..40 }?.let { bar.progress = it + 40 }
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        ageBody = CheckBox(this).apply {
+            text = "Apply to face and visible body within the selected region"
+            isChecked = state?.getBoolean("ageBody") ?: false
+        }
+        panel.addView(ageBody)
+        button("Compare before and after", panel) { previewAge() }
+        panel.visibility = if (choices.checkedRadioButtonId == 4) View.VISIBLE else View.GONE
+        choices.setOnCheckedChangeListener { _, checked -> panel.visibility = if (checked == 4) View.VISIBLE else View.GONE }
+    }
+
+    private fun previewAge() {
+        val selected = preview.selection
+        val photo = preview.copyPhoto()
+        if (selected == null || photo == null || !isolatedRegion(selected, preview.candidates)) {
+            photo?.recycle(); alert("Select one subject", "Choose and inspect the intended region first."); return
+        }
+        val age = try { currentAge() } catch (error: Exception) {
+            photo.recycle(); alert("Age adjustment", error.message.orEmpty()); return
+        }
+        val reference = SubjectReference(photoId, selected)
+        val request = WorkflowRequest(workflow, listOf(reference), 0, age.strength, age = age)
+        decoder.execute {
+            val adjusted = runCatching { applyAppearance(photo, ageRegion(this, photo, selected, age), request) }
+            runOnUiThread {
+                if (isDestroyed) {
+                    photo.recycle(); adjusted.getOrNull()?.recycle(); return@runOnUiThread
+                }
+                val after = adjusted.getOrElse {
+                    photo.recycle(); alert("Preview unavailable", it.message.orEmpty()); return@runOnUiThread
+                }
+                var showAfter = true
+                val comparison = ImageView(this).apply { adjustViewBounds = true; setImageBitmap(after) }
+                val dialog = AlertDialog.Builder(this).setTitle("After · simulated appearance").setView(comparison)
+                    .setNegativeButton("Close", null).setPositiveButton("Before", null).create()
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                        showAfter = !showAfter
+                        comparison.setImageBitmap(if (showAfter) after else photo)
+                        dialog.setTitle(if (showAfter) "After · simulated appearance" else "Before · source")
+                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).text = if (showAfter) "Before" else "After"
+                    }
+                }
+                dialog.setOnDismissListener { comparison.setImageDrawable(null); photo.recycle(); after.recycle() }
+                dialog.show()
+            }
+        }
     }
 
     private fun alert(title: String, copy: String) {
@@ -301,6 +447,35 @@ class WorkflowActivity : Activity() {
             setOnClickListener { action() }
             parent.addView(this)
         }
+}
+
+internal fun detectPeople(context: Context, bitmap: Bitmap): List<Region> {
+    val options = ObjectDetector.ObjectDetectorOptions.builder()
+        .setBaseOptions(BaseOptions.builder().setModelAssetPath("efficientdet_lite0.tflite").build())
+        .setCategoryAllowlist(listOf("person")).setMaxResults(24).setScoreThreshold(0.37f).build()
+    return ObjectDetector.createFromOptions(context, options).use { detector ->
+        BitmapImageBuilder(bitmap).build().use { image ->
+            detector.detect(image).detections().mapNotNull {
+                val box = it.boundingBox()
+                runCatching {
+                    Region((box.left / bitmap.width).coerceIn(0f, 1f), (box.top / bitmap.height).coerceIn(0f, 1f),
+                        (box.right / bitmap.width).coerceIn(0f, 1f), (box.bottom / bitmap.height).coerceIn(0f, 1f))
+                }.getOrNull()
+            }.sortedWith(compareBy({ it.left }, { it.top }))
+        }
+    }
+}
+
+internal fun ageRegion(context: Context, photo: Bitmap, region: Region, age: AgeDesign): Region {
+    if (age.scope == AgeScope.FACE_AND_VISIBLE_BODY || age.years == 0 || age.strength == 0) return region
+    val area = region.pixels(photo.width, photo.height)
+    val crop = Bitmap.createBitmap(photo, area.left, area.top, area.width(), area.height())
+    val candidates = try { detectSubjects(context, crop) } finally { if (crop !== photo) crop.recycle() }
+    require(candidates.size == 1) { "Face-only age simulation needs exactly one visible face in the selected region." }
+    val face = candidates.single()
+    fun x(value: Float) = ((area.left + value * area.width()) / photo.width).coerceIn(0f, 1f)
+    fun y(value: Float) = ((area.top + value * area.height()) / photo.height).coerceIn(0f, 1f)
+    return Region(x(face.left), y(face.top), x(face.right), y(face.bottom))
 }
 
 internal fun detectSubjects(context: Context, bitmap: Bitmap): List<Region> {
@@ -371,6 +546,7 @@ private class SubjectView(context: Context, private val changed: () -> Unit) : V
     var selection: Region? = null
     var manual = false
     val hasPhoto get() = photo != null
+    fun copyPhoto() = photo?.copy(Bitmap.Config.ARGB_8888, false)
 
     private val zoom = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {

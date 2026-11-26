@@ -59,17 +59,22 @@ internal data class SubjectReference(val photoId: Long, val region: Region) {
 }
 
 internal data class WorkflowRequest(
-    val flow: Workflow, val references: List<SubjectReference>, val settings: Int, val amount: Int
+    val flow: Workflow, val references: List<SubjectReference>, val settings: Int, val amount: Int,
+    val composite: CompositeDesign? = null, val age: AgeDesign? = null
 ) {
     init {
-        require(references.size in (if (flow == Workflow.COMPOSITE) 2..4 else 1..1))
+        require(references.size in (if (flow == Workflow.COMPOSITE) (if (composite == null) 2..4 else 1..4) else 1..1))
+        require(composite == null || flow == Workflow.COMPOSITE && composite.layers.size == references.size)
+        require(age == null || flow == Workflow.COSMETIC)
         require(references.map { it.photoId }.distinct().size == references.size)
         require(settings in 0..2 && amount in 0..100)
     }
 
     fun encode(): String = JSONObject()
         .put("version", 1).put("workflow", flow.name).put("settings", settings).put("amount", amount)
-        .put("references", JSONArray(references.map { it.json() })).toString()
+        .put("references", JSONArray(references.map { it.json() }))
+        .put("composite", composite?.json() ?: JSONObject.NULL)
+        .put("age", age?.json() ?: JSONObject.NULL).toString()
 
     companion object {
         fun decode(text: String): WorkflowRequest {
@@ -82,7 +87,9 @@ internal data class WorkflowRequest(
                     val row = refs.getJSONObject(it)
                     SubjectReference(row.getLong("photoId"), Region.read(row.getJSONArray("region")))
                 },
-                doc.getInt("settings"), doc.getInt("amount")
+                doc.getInt("settings"), doc.getInt("amount"),
+                doc.optJSONObject("composite")?.let(CompositeDesign::read),
+                doc.optJSONObject("age")?.let(AgeDesign::read)
             )
         }
     }
@@ -93,6 +100,9 @@ internal fun isolatedRegion(region: Region, detected: List<Region>) =
 
 internal fun applyAppearance(source: Bitmap, region: Region, request: WorkflowRequest): Bitmap {
     require(request.flow == Workflow.COSMETIC || request.flow == Workflow.REPAIR)
+    if (request.age?.years == 0 || request.age?.strength == 0) {
+        return requireNotNull(source.copy(Bitmap.Config.ARGB_8888, false))
+    }
     val output = source.copy(Bitmap.Config.ARGB_8888, true) ?: error("Could not copy the image")
     val area = region.pixels(source.width, source.height)
     val width = area.width()
@@ -100,7 +110,9 @@ internal fun applyAppearance(source: Bitmap, region: Region, request: WorkflowRe
     val pixels = IntArray(width * height)
     source.getPixels(pixels, 0, width, area.left, area.top, width, height)
     val rendered = pixels.copyOf()
-    val strength = request.amount / 100f
+    val age = request.age
+    val strength = if (age == null) request.amount / 100f
+        else age.strength / 100f * kotlin.math.abs(age.years) / 40f
     val tint = when (request.settings) {
         0 -> Color.rgb(160, 108, 74)
         1 -> Color.rgb(185, 92, 120)
@@ -119,7 +131,9 @@ internal fun applyAppearance(source: Bitmap, region: Region, request: WorkflowRe
         fun channel(read: (Int) -> Int): Int {
             val original = read(pixel)
             val local = (read(left) + read(right) + read(up) + read(down) + original * 2) / 6f
-            val adjusted = if (request.flow == Workflow.COSMETIC) {
+            val adjusted = if (age != null) {
+                if (age.years < 0) local * 0.96f + 11f else original + (original - local) * 1.9f - 6
+            } else if (request.flow == Workflow.COSMETIC) {
                 val base = if (request.settings == 2) local else original.toFloat()
                 base * 0.78f + read(tint) * 0.22f
             } else when (request.settings) {

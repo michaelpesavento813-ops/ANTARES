@@ -238,7 +238,30 @@ private class Processor(private val context: Context, private val db: ProjectSto
             }
             return upright(file, maxOf(size.outWidth, size.outHeight))
         }
-        val result = if (request.flow == Workflow.COMPOSITE) {
+        val design = request.composite
+        val result = if (design != null) {
+            require(design.reviewed) { "Inspect and confirm the subject cutout before rendering" }
+            CompositeRenderer(context, task.projectId, 2048).use { renderer ->
+                request.references.forEachIndexed { index, reference ->
+                    val cutout = renderer.cutout(reference, design.layers[index])
+                    try {
+                        val mask = Bitmap.createBitmap(cutout.width, cutout.height, Bitmap.Config.ARGB_8888)
+                        try {
+                            Canvas(mask).apply {
+                                drawColor(Color.WHITE)
+                                drawBitmap(cutout, 0f, 0f, Paint().apply {
+                                    xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
+                                })
+                            }
+                            atomic(outputFile(context, task.id, "mask-$index.png")) { output ->
+                                check(mask.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Isolation mask could not be written" }
+                            }
+                        } finally { mask.recycle() }
+                    } finally { cutout.recycle() }
+                }
+                renderer.render(request.references, design)
+            }
+        } else if (request.flow == Workflow.COMPOSITE) {
             val crops = mutableListOf<Bitmap>()
             try {
                 for (reference in request.references) {
@@ -254,7 +277,10 @@ private class Processor(private val context: Context, private val db: ProjectSto
         } else {
             val reference = request.references.single()
             val source = photo(reference)
-            try { applyAppearance(source, reference.region, request) } finally { source.recycle() }
+            try {
+                val region = request.age?.let { ageRegion(context, source, reference.region, it) } ?: reference.region
+                applyAppearance(source, region, request)
+            } finally { source.recycle() }
         }
         try {
             atomic(outputFile(context, task.id, "png")) { output ->

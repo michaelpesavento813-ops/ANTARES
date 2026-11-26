@@ -34,7 +34,13 @@ internal class SubjectArchive(private val context: Context) {
                         files["original-$hash"] = originalFile(context, hash)
                     }
                     "scan", "batch" -> files["result-${row.id}.json"] = outputFile(context, row.id, "json")
-                    "png" -> files["result-${row.id}.png"] = outputFile(context, row.id, "png")
+                    "png" -> {
+                        files["result-${row.id}.png"] = outputFile(context, row.id, "png")
+                        val design = row.input.takeIf { it.isNotEmpty() }?.let(WorkflowRequest::decode)?.composite
+                        design?.layers?.indices?.forEach { index ->
+                            files["mask-${row.id}-$index.png"] = outputFile(context, row.id, "mask-$index.png")
+                        }
+                    }
                 }
             }
             val manifest = JSONObject().put("format", "antares-subject").put("version", 1)
@@ -127,7 +133,12 @@ internal class SubjectArchive(private val context: Context) {
                         row.kind == "batch" -> row.input.split(',').joinToString(",") { remapped.getValue(it.toLong()).toString() }
                         row.kind in setOf("png", "scan") && row.input.isNotEmpty() -> {
                             val request = WorkflowRequest.decode(row.input)
-                            request.copy(references = request.references.map { it.copy(photoId = remapped.getValue(it.photoId)) }).encode()
+                            val design = request.composite?.let { value ->
+                                value.copy(backgroundPhoto = value.backgroundPhoto?.let(remapped::getValue),
+                                    layers = value.layers.map { style -> style.copy(reusedMask = style.reusedMask?.let(remapped::getValue)) })
+                            }
+                            request.copy(references = request.references.map { it.copy(photoId = remapped.getValue(it.photoId)) },
+                                composite = design).encode()
                         }
                         else -> ""
                     }
@@ -158,8 +169,17 @@ internal class SubjectArchive(private val context: Context) {
                             check(backup.isFile) { "A result is missing from the backup" }
                             val target = outputFile(context, newId, ext)
                             createdOutputs += target
-                            if (ext == "png") atomic(target) { stream -> backup.inputStream().use { it.copyTo(stream) } }
-                            else {
+                            if (ext == "png") {
+                                atomic(target) { stream -> backup.inputStream().use { it.copyTo(stream) } }
+                                val design = archivedInput.takeIf { it.isNotEmpty() }?.let(WorkflowRequest::decode)?.composite
+                                design?.layers?.indices?.forEach { index ->
+                                    val staged = File(directory, "mask-${row.id}-$index.png")
+                                    check(staged.isFile) { "A saved isolation mask is missing" }
+                                    val mask = outputFile(context, newId, "mask-$index.png")
+                                    createdOutputs += mask
+                                    atomic(mask) { stream -> staged.inputStream().use { it.copyTo(stream) } }
+                                }
+                            } else {
                                 val document = JSONObject(backup.readText()).put("projectId", id).put("batchId", newId)
                                 val results = document.getJSONArray("results")
                                 repeat(results.length()) {
@@ -214,7 +234,7 @@ internal class SubjectArchive(private val context: Context) {
     )
 
     private companion object {
-        val FILE_NAME = Regex("original-[a-f0-9]{64}|result-[1-9][0-9]*\\.(json|png)")
+        val FILE_NAME = Regex("original-[a-f0-9]{64}|result-[1-9][0-9]*\\.(json|png)|mask-[1-9][0-9]*-[0-3]\\.png")
         val KINDS = setOf("import", "scan", "batch", "png", "csv", "json", "save_png")
     }
 }
