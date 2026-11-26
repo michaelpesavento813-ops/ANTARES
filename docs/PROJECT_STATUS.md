@@ -27,3 +27,9 @@
 - Historical landmark JSON has 68 rows: 62 detections with 478 points and 6 no-face outcomes. It contains no original SHA-256 hashes, and none of its filename-and-size pairs match the repository's original photographs. This prevents a direct comparison against that historical export with the presently paired files.
 - A-006, privacy blocker. The first packaged APK inherited INTERNET and ACCESS_NETWORK_STATE from its runtime dependencies. The manifest now removes both permissions and CI checks the actual APK. Private database and app data are excluded from automatic Android cloud backups and device transfers.
 - The production signing configuration accepts a retained external keystore via secure environment variables. Current APKs use debug certificates. Release qualification still requires a production key and acceptance of the production-signed APK.
+
+## Current verification checkpoint
+
+- 0.6.0-dev passed Android 15 hosted acceptance in run 45745237393 at commit `dd65e0e93795d0ed4b96bcc9cdf72a3c0f9db462`. APK package artifact 15082344564 contains signature, permission and checksum evidence. See [the test report](TEST_REPORT.md).
+- Android acceptance verified the automatic cutout after fixing single-plane mask handling and disposable bitmap ownership. The same suite verified manual mask editing and reopening, all five background modes, simulated age controls, scoped subject archives, and retained original bytes.
+- Open release gates include physical Galaxy A14 acceptance, broader high-resolution, low-memory and real-crowd tests, fine-edge optical matting, validated age calibration, complete restoration, body mapping and forensic tattoo gates, legacy migration, and retained production signing.
